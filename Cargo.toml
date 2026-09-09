@@ -1,0 +1,35 @@
+[workspace]
+resolver = "3"
+members = ["crates/chess-core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/Almonok/chessmonok"
+
+[workspace.lints.rust]
+missing_debug_implementations = "warn"
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Chess code is full of intentional small-integer conversions and bit math.
+cast_possible_truncation = "allow"
+# `#[must_use]` on every small accessor is more noise than signal here.
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
+# Benchmarks and perft runs need release-grade codegen with debug symbols.
+[profile.bench]
+lto = "fat"
+codegen-units = 1
+debug = true

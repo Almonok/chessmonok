@@ -1,0 +1,16 @@
+# Rust
+/target/
+
+# Python (training/)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Model artifacts and self-play data are large and reproducible
+/models/*.onnx
+/models/*.pt
+/data/
+
+# macOS
+.DS_Store
