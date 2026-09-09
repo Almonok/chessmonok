@@ -1,0 +1,17 @@
+{
+    "conventionalCommits.scopes": [
+        "core",
+        "nn",
+        "search",
+        "uci",
+        "bot",
+        "train",
+        "ci",
+        "deps",
+        "repo",
+        "doc"
+    ],
+    "rust-analyzer.check.command": "clippy",
+    "rust-analyzer.check.allTargets": true,
+    "editor.formatOnSave": true
+}
