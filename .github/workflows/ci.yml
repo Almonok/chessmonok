@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A new push to a branch makes the previous run pointless. Cancelling it keeps
+# the private repo's Actions minutes for runs whose result anyone will read.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt, clippy, test
+    # Ubuntu runners bill at 1x where macOS bills at 10x. A macOS job earns its
+    # place only once we test CoreML inference, which cannot run anywhere else.
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # `rustup show` installs whatever rust-toolchain.toml pins, so the
+      # toolchain version lives in exactly one place.
+      - name: Install pinned toolchain
+        run: rustup show
+
+      # Without this, every run recompiles all dependencies from source.
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      # `-D warnings` promotes warnings to errors in CI only; locally they stay
+      # warnings so half-finished code still compiles.
+      - name: Lints
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace
+
+      # Catches broken intra-doc links, which nothing else does.
+      - name: Docs
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
