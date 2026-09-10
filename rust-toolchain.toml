@@ -1,0 +1,5 @@
+# Pinning the toolchain keeps local builds and CI on the same compiler, so a
+# lint that passes on one cannot fail on the other. Bump deliberately.
+[toolchain]
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]
