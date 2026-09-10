@@ -12,5 +12,8 @@ venv/
 /models/*.pt
 /data/
 
+# Agent scratch space: worktrees and session state, never part of a build
+/.claude/
+
 # macOS
 .DS_Store
