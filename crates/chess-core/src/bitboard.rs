@@ -9,13 +9,19 @@
 use std::fmt;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Not};
 
-use crate::Square;
+use crate::{File, Rank, Square};
 
 /// A set of squares, one bit per square.
 ///
 /// Unlike [`Square`], this type has no invariant to protect: all 2^64 bit
 /// patterns are meaningful sets, so [`Bitboard::from_bits`] can accept any
 /// `u64` and the set operations can never produce an invalid value.
+///
+/// Every operation on a `Bitboard` is pure: it reads the set and returns a new
+/// one, never mutating in place except through the explicit `&mut self`
+/// methods. Computing a board and discarding it is therefore always dead code,
+/// so the whole type is `#[must_use]` rather than each method separately.
+#[must_use]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Bitboard(u64);
 
@@ -106,6 +112,59 @@ impl Bitboard {
             }
             None => None,
         }
+    }
+
+    /// Every square on the given file.
+    pub const fn file(file: File) -> Self {
+        Self(0x0101_0101_0101_0101u64 << file.index())
+    }
+
+    /// Every square on the given rank.
+    pub const fn rank(rank: Rank) -> Self {
+        Self(0xFFu64 << (rank.index() * 8))
+    }
+    /// Every square in the set, moved one rank towards rank 8.
+    /// Squares on rank 8 fall off the board and are dropped.
+    pub const fn north(self) -> Self {
+        Self(self.0 << 8)
+    }
+
+    /// Every square in the set, moved one rank towards rank 1.
+    /// Squares on rank 1 fall off the board and are dropped.
+    pub const fn south(self) -> Self {
+        Self(self.0 >> 8)
+    }
+
+    /// Every square in the set, moved one file towards the h-file.
+    /// Squares on the h-file fall off the board and are dropped.
+    pub const fn east(self) -> Self {
+        Self((self.0 & !Self::file(File::H).0) << 1)
+    }
+
+    /// Every square in the set, moved one file towards the a-file.
+    /// Squares on the a-file fall off the board and are dropped.
+    pub const fn west(self) -> Self {
+        Self((self.0 & !Self::file(File::A).0) >> 1)
+    }
+
+    /// One rank towards rank 8 and one file towards the h-file.
+    pub const fn north_east(self) -> Self {
+        Self((self.0 & !Self::file(File::H).0) << 9)
+    }
+
+    /// One rank towards rank 8 and one file towards the a-file.
+    pub const fn north_west(self) -> Self {
+        Self((self.0 & !Self::file(File::A).0) << 7)
+    }
+
+    /// One rank towards rank 1 and one file towards the h-file.
+    pub const fn south_east(self) -> Self {
+        Self((self.0 & !Self::file(File::H).0) >> 7)
+    }
+
+    /// One rank towards rank 1 and one file towards the a-file.
+    pub const fn south_west(self) -> Self {
+        Self((self.0 & !Self::file(File::A).0) >> 9)
     }
 }
 
