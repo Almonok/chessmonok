@@ -270,8 +270,7 @@ impl Position {
 /// Returned when a string is not a well-formed FEN.
 ///
 /// An enum and not a string because these end up in front of a human, via UCI
-/// or a test failure, and "invalid FEN" names nothing. Follows the `thiserror`
-/// pattern from [`ParseSquareError`](crate::square), in its multi-variant form.
+/// or a test failure, and "invalid FEN" names nothing.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum FenError {
     /// A FEN has exactly six space-separated fields.
