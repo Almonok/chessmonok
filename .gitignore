@@ -17,3 +17,16 @@ venv/
 
 # macOS
 .DS_Store
+
+# Personal notes and documentation
+docs/
+
+# Engine work: nets, tools, books, match PGNs, the lichess-bot checkout and its secrets
+/nets/
+/tools/
+/books/
+/matches/
+/bot/lichess-bot/
+/bot/.env
+/.superpowers/
+/config.json

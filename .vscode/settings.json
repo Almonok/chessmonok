@@ -9,7 +9,9 @@
         "ci",
         "deps",
         "repo",
-        "doc"
+        "doc",
+        "eval",
+        "engine"
     ],
     "rust-analyzer.check.command": "clippy",
     "rust-analyzer.check.allTargets": true,

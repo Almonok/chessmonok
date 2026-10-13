@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/chess-core"]
+members = ["crates/chess-core", "crates/eval", "crates/search", "crates/engine"]
 
 [workspace.package]
 version = "0.1.0"
@@ -8,6 +8,11 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT"
 repository = "https://github.com/Almonok/chessmonok"
+
+[workspace.dependencies]
+shakmaty = "=0.30.1"
+eval = { path = "crates/eval" }
+search = { path = "crates/search" }
 
 [workspace.lints.rust]
 missing_debug_implementations = "warn"
