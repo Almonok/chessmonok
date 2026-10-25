@@ -14,4 +14,5 @@ mkdir -p lichess-bot/engines && cp ../target/release/chessmonok lichess-bot/engi
 cd lichess-bot
 [ -d .venv ] || uv venv -q --python 3.12 .venv
 uv pip install -q -p .venv -r requirements.txt
+[ -f ../../books/8moves_v3.bin ] || .venv/bin/python ../make_book.py ../../books/8moves_v3.pgn ../../books/8moves_v3.bin
 exec .venv/bin/python lichess-bot.py --config ../config.yml

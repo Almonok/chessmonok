@@ -4,8 +4,13 @@
 [lichess-bot](https://github.com/lichess-bot-devs/lichess-bot) (AGPL-3.0, used
 unmodified). It clones lichess-bot at a pinned commit into `bot/lichess-bot/`,
 installs it with uv, builds the release engine and starts the bot with
-`config.yml`: standard chess, bullet/blitz/rapid, one game at a time, casual
-games only.
+`config.yml`: standard chess, blitz only, one game at a time, casual and rated.
+When idle for a minute it challenges other bots to rated 3+0, 3+2, 5+0 or 5+2
+games, and it keeps every game's PGN in `bot/lichess-bot/game_records/`.
+
+The first 8 moves come from a local polyglot book that `run.sh` builds once from
+`books/8moves_v3.pgn` (fetched by `scripts/install-tools.sh`) with
+`make_book.py`. Online books stay off.
 
 ## One-time setup
 
@@ -35,4 +40,5 @@ bot/run.sh
 ```
 
 Then, from your own account, challenge the bot to a casual blitz game. Stop it
-with Ctrl-C.
+with Ctrl-C: it finishes the game in progress first, so a rated game is never
+abandoned.
