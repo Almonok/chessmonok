@@ -1,0 +1,4 @@
+# `cargo xtask <cmd>`: repo tooling written in Rust (the "xtask" pattern),
+# so the repo needs no shell scripts or extra installs.
+[alias]
+xtask = "run --quiet --package xtask --"

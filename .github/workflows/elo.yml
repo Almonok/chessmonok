@@ -1,0 +1,87 @@
+name: Elo
+
+# An SPRT match between the dispatched branch and a base rev, using
+# `cargo xtask elo --profile ci`.
+#
+# Manual only, never a required check, allowed to fail: a match costs about
+# an hour of runner time, and a GitHub runner is not the reference machine.
+# The maintainer's Mac is, and its NEON code paths never run on these x86
+# runners, so a result here is a hint, not evidence. That is also why CI
+# results are never written to elo/history.jsonl (`--no-record`).
+#
+# To run it on a PR: Actions > Elo > Run workflow, pick the PR's branch.
+on:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: Git reference (branch, tag or commit) to compare against
+        default: origin/main
+      mode:
+        description: gain (prove a gain) or no-regression (prove no loss)
+        type: choice
+        options: [gain, no-regression]
+        default: gain
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  elo:
+    name: SPRT (ci profile)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 120
+
+    steps:
+      # Full history: the harness resolves and checks out the base rev.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install pinned toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install fastchess and the opening suite
+        run: scripts/install-tools.sh
+
+      # Inputs go through env, never straight into the script, so a crafted
+      # input cannot inject shell.
+      - name: Match
+        id: match
+        env:
+          BASE: ${{ inputs.base }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set +e
+          cargo xtask elo --profile ci --no-record --new HEAD --base "$BASE" --mode "$MODE" | tee elo.txt
+          echo "code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Job summary
+        if: always()
+        env:
+          BASE: ${{ inputs.base }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          sed -n '/^=====/,/^=====/p' elo.txt > summary.txt
+          { echo "### Elo vs \`$BASE\` (ci profile, $MODE)"
+            echo '```'; cat summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment on the PR
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pr=$(gh pr list --head "$GITHUB_REF_NAME" --json number --jq '.[0].number')
+          [ -n "$pr" ] || exit 0
+          { echo "**Elo (ci profile, hint only: the Mac is the reference)**"
+            echo '```'; cat summary.txt; echo '```'; } | gh pr comment "$pr" --body-file -
+
+      # The verdict's exit code (0 = PASS) decides the job's colour.
+      - name: Verdict
+        run: exit "${{ steps.match.outputs.code }}"

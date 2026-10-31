@@ -1,0 +1,12 @@
+Finished game 1 (chessmonok vs sf1600): 0-1 {Black mates}
+Finished game 2 (sf1600 vs chessmonok): 0-1 {Black mates}
+Finished game 4 (sf1600 vs chessmonok): 1-0 {White mates}
+Finished game 3 (chessmonok vs sf1600): 0-1 {Black mates}
+--------------------------------------------------
+Results of chessmonok vs sf1600 (10+0.1, NULL - 1t, NULL - 16MB, 8moves_v3.pgn):
+Elo: -157.66 +/- 122.25, nElo: -168.96 +/- 107.67
+LOS: 0.11 %, DrawRatio: 25.00 %, PairsRatio: 0.25
+Games: 40, Wins: 9, Losses: 26, Draws: 5, Points: 11.5 (28.75 %)
+Ptnml(0-2): [9, 3, 5, 2, 1], WL/DD Ratio: inf
+--------------------------------------------------
+Finished match

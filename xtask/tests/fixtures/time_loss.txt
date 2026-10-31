@@ -1,0 +1,16 @@
+Finished game 2 (old vs new): 0-1 {Black mates}
+Finished game 4 (old vs new): 0-1 {Black mates}
+Finished game 3 (new vs old): 1-0 {White mates}
+Finished game 1 (new vs old): 1-0 {White mates}
+Finished game 21 (new vs old): 0-1 {White loses on time}
+Finished game 22 (old vs new): 1-0 {Black loses on time}
+Finished game 23 (new vs old): 0-1 {White disconnects}
+--------------------------------------------------
+Results of new vs old (8+0.08, NULL, NULL, 8moves_v3.pgn):
+Elo: inf +/- nan, nElo: inf +/- nan
+LOS: 100.00 %, DrawRatio: 0.00 %, PairsRatio: inf
+Games: 20, Wins: 20, Losses: 0, Draws: 0, Points: 20.0 (100.00 %)
+Ptnml(0-2): [0, 0, 0, 0, 10], WL/DD Ratio: nan
+LLR: 0.40 (13.5%) (-2.94, 2.94) [0.00, 10.00]
+--------------------------------------------------
+Finished match

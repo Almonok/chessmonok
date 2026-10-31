@@ -1,0 +1,2 @@
+# Appends from parallel branches must never conflict: keep both sides' lines.
+elo/history.jsonl merge=union
