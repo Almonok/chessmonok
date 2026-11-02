@@ -14,7 +14,7 @@ engine:                            # Engine settings.
   ponder: false                    # Think on opponent's time.
 
   polyglot:
-    enabled: true                  # Activate polyglot book.
+    enabled: false                 # Off: results then reflect the engine's own play. Set true to play the first moves from books/8moves_v3.bin (run.sh builds it).
     book:
       standard:                    # List of book file paths for variant standard.
         - ../../books/8moves_v3.bin  # Built from books/8moves_v3.pgn by run.sh (make_book.py).
@@ -94,8 +94,9 @@ engine:                            # Engine settings.
   homemade_options:
 #   Hash: 256
 
-# uci_options:                     # Arbitrary UCI options passed to the engine.
-#   chessmonok declares no option lichess-bot needs: the template's Stockfish
+  uci_options:                     # Arbitrary UCI options passed to the engine.
+    EvalFile: ./engines/current.nnue # The net run.sh copies next to the engine (paths are relative to lichess-bot/).
+#   Only options chessmonok declares may go here: the template's Stockfish
 #   options (Move Overhead, Threads, Hash, SyzygyPath, UCI_ShowWDL) would make
 #   it refuse to start. Lag is handled by the top-level move_overhead below.
 #   go_commands:                   # Additional options to pass to the UCI go command.

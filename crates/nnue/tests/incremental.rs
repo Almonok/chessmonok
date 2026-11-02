@@ -1,13 +1,14 @@
-//! Exercise N2's spec: an accumulator updated from a move's dirty pieces is
+//! An accumulator updated from a move's dirty pieces is
 //! the accumulator refreshed from scratch after the move.
 
 use std::sync::OnceLock;
 
 use eval::dirty_pieces;
-use nnue::{Accumulator, Network};
+use nnue::features::active_features;
+use nnue::{Accumulator, L1, Network};
 use shakmaty::fen::Fen;
 use shakmaty::uci::UciMove;
-use shakmaty::{CastlingMode, Chess, Move, Position};
+use shakmaty::{CastlingMode, Chess, Color, Move, Position};
 
 fn net() -> &'static Network {
     static NET: OnceLock<Network> = OnceLock::new();
@@ -35,11 +36,24 @@ fn assert_update_matches_refresh(before: &Chess, m: Move, context: &str) {
     );
 }
 
+#[test]
+fn refresh_is_the_bias_plus_one_row_per_active_feature() {
+    let network = net();
+    let position = pos("4k3/8/8/8/8/8/4P3/4K3 w - - 0 1");
+    let accumulator = Accumulator::refresh(network, &position);
+    for perspective in [Color::White, Color::Black] {
+        let features = active_features(position.board(), perspective);
+        assert_eq!(features.len(), 1, "one pawn; kings have no feature");
+        let expected: [i16; L1] =
+            std::array::from_fn(|i| network.ft_bias[i] + network.ft_row(features[0])[i]);
+        assert_eq!(*accumulator.half(perspective), expected, "{perspective:?}");
+    }
+}
+
 const CASTLES_WHITE: &str = "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1";
 const CASTLES_BLACK: &str = "r3k2r/8/8/8/8/8/8/R3K2R b KQkq - 0 1";
 
 #[test]
-#[ignore = "exercise N2"]
 fn every_kind_of_move_updates_exactly() {
     let cases = [
         (
@@ -108,7 +122,6 @@ impl Rng {
 }
 
 #[test]
-#[ignore = "exercise N2"]
 fn update_matches_refresh_over_random_games() {
     for seed in 1..=100u64 {
         let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));

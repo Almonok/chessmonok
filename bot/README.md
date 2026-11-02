@@ -8,9 +8,18 @@ installs it with uv, builds the release engine and starts the bot with
 When idle for a minute it challenges other bots to rated 3+0, 3+2, 5+0 or 5+2
 games, and it keeps every game's PGN in `bot/lichess-bot/game_records/`.
 
-The first 8 moves come from a local polyglot book that `run.sh` builds once from
-`books/8moves_v3.pgn` (fetched by `scripts/install-tools.sh`) with
-`make_book.py`. Online books stay off.
+The engine evaluates with the NNUE net `nets/current.nnue`, a symlink to the
+net to play (`run.sh` refuses to start without it):
+
+```sh
+ln -sf run1-e11.nnue nets/current.nnue
+```
+
+The bot plays from its first move on its own: the local opening book is off,
+so its results reflect the engine. To play the first 8 moves from a book
+instead, set `polyglot: enabled: true` in `config.yml`; `run.sh` then builds
+the book once from `books/8moves_v3.pgn` (fetched by
+`scripts/install-tools.sh`) with `make_book.py`. Online books stay off.
 
 ## One-time setup
 

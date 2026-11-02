@@ -27,8 +27,10 @@ struct Oracle {
 #[derive(Deserialize)]
 struct Detailed {
     fen: String,
-    stm_features: Vec<usize>,
-    nstm_features: Vec<usize>,
+    #[serde(rename = "stm_features")]
+    side_to_move_features: Vec<usize>,
+    #[serde(rename = "nstm_features")]
+    not_side_to_move_features: Vec<usize>,
     acc_white: Vec<i16>,
     acc_black: Vec<i16>,
     l1_out: Vec<u8>,
@@ -83,16 +85,16 @@ fn features_match_the_oracle() {
     let (_, oracle) = fixture();
     for e in &oracle.detailed {
         let pos = position(&e.fen);
-        let stm = pos.turn();
+        let side_to_move = pos.turn();
         assert_eq!(
-            active_features(pos.board(), stm),
-            e.stm_features,
+            active_features(pos.board(), side_to_move),
+            e.side_to_move_features,
             "{}",
             e.fen
         );
         assert_eq!(
-            active_features(pos.board(), stm.other()),
-            e.nstm_features,
+            active_features(pos.board(), side_to_move.other()),
+            e.not_side_to_move_features,
             "{}",
             e.fen
         );
@@ -104,7 +106,7 @@ fn half(values: &[i16]) -> [i16; L1] {
 }
 
 #[test]
-#[ignore = "exercise N1; needs CHESSMONOK_NET"]
+#[ignore = "needs CHESSMONOK_NET"]
 fn accumulators_match_the_oracle() {
     let (net, oracle) = fixture();
     for e in &oracle.detailed {
@@ -115,7 +117,7 @@ fn accumulators_match_the_oracle() {
 }
 
 #[test]
-#[ignore = "exercise N1; needs CHESSMONOK_NET"]
+#[ignore = "needs CHESSMONOK_NET"]
 fn hidden_layers_match_the_oracle() {
     let (net, oracle) = fixture();
     for e in &oracle.detailed {
@@ -133,7 +135,7 @@ fn hidden_layers_match_the_oracle() {
 }
 
 #[test]
-#[ignore = "exercise N1; needs CHESSMONOK_NET"]
+#[ignore = "needs CHESSMONOK_NET"]
 fn evals_match_the_oracle() {
     let (net, oracle) = fixture();
     let nnue = Nnue::new(Arc::clone(net));

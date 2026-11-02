@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -83,7 +84,10 @@ fn illegal_move_keeps_position() {
 #[test]
 fn castling_move_is_accepted() {
     let out = session("position fen r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1 moves e1g1\ngo depth 1\n");
-    assert!(!out.contains("info string"), "{out}");
+    let complaints = out
+        .lines()
+        .filter(|line| line.starts_with("info string") && !line.starts_with("info string eval "));
+    assert_eq!(complaints.count(), 0, "{out}");
 }
 
 #[test]
@@ -121,4 +125,123 @@ fn random_mover_varies_its_moves() {
         "only {} distinct moves: {moves:?}",
         moves.len()
     );
+}
+
+/// A random net written to a temporary file whose name contains a space.
+/// The file (21 MB) is deleted when this value is dropped.
+struct TemporaryNet {
+    path: PathBuf,
+}
+
+impl TemporaryNet {
+    fn new(name: &str) -> Self {
+        let path =
+            std::env::temp_dir().join(format!("chessmonok {name} {}.nnue", std::process::id()));
+        std::fs::write(&path, nnue::Network::random(5).to_bytes()).unwrap();
+        TemporaryNet { path }
+    }
+
+    fn path(&self) -> String {
+        self.path.display().to_string()
+    }
+}
+
+impl Drop for TemporaryNet {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[test]
+fn temporary_nets_are_deleted_when_dropped() {
+    let net = TemporaryNet::new("dropped");
+    let path = net.path.clone();
+    assert!(path.exists());
+    drop(net);
+    assert!(!path.exists());
+}
+
+#[test]
+fn the_handshake_lists_eval_file() {
+    let out = session("uci\nquit\n");
+    assert!(
+        out.contains("option name EvalFile type string default <empty>"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_valid_eval_file_is_loaded_and_used() {
+    let net = TemporaryNet::new("valid");
+    let out = session(&format!(
+        "setoption name EvalFile value {}\nposition startpos\ngo depth 2\n",
+        net.path()
+    ));
+    assert!(
+        out.contains(&format!("info string loaded {}", net.path())),
+        "{out}"
+    );
+    assert!(out.contains("info string eval nnue"), "{out}");
+    assert!(is_legal(&Chess::default(), bestmove(&out)), "{out}");
+}
+
+#[test]
+fn eval_file_paths_may_contain_spaces() {
+    let net = TemporaryNet::new("with  two spaces");
+    let out = session(&format!("setoption name EvalFile value {}\n", net.path()));
+    assert!(out.contains("info string loaded"), "{out}");
+}
+
+#[test]
+fn a_broken_eval_file_stops_the_engine_from_searching() {
+    let out =
+        session("setoption name EvalFile value /no/such/net.nnue\nposition startpos\ngo depth 2\n");
+    assert!(out.contains("info string EvalFile error:"), "{out}");
+    assert!(
+        out.contains("info string cannot search: EvalFile error:"),
+        "{out}"
+    );
+    assert_eq!(bestmove(&out), "0000");
+    assert!(!out.contains("info depth"), "no search may run: {out}");
+}
+
+#[test]
+fn extra_spaces_before_the_value_are_ignored() {
+    let net = TemporaryNet::new("extra space");
+    let out = session(&format!("setoption name EvalFile value   {}\n", net.path()));
+    assert!(out.contains("info string loaded"), "{out}");
+}
+
+#[test]
+fn the_advertised_default_means_material() {
+    // The handshake says `default <empty>`; a GUI may send that back.
+    let out = session("setoption name EvalFile value <empty>\nposition startpos\ngo depth 2\n");
+    assert!(!out.contains("EvalFile error"), "{out}");
+    assert!(out.contains("info string eval material"), "{out}");
+}
+
+#[test]
+fn an_empty_eval_file_means_material() {
+    let out = session(
+        "setoption name EvalFile value /no/such/net.nnue\nsetoption name EvalFile value\nposition startpos\ngo depth 2\n",
+    );
+    assert!(out.contains("info string eval material"), "{out}");
+    assert!(is_legal(&Chess::default(), bestmove(&out)), "{out}");
+}
+
+/// The node total of a `bench` run.
+fn bench_nodes(out: &str) -> u64 {
+    let line = out
+        .lines()
+        .find(|line| line.starts_with("info string bench nodes "))
+        .unwrap_or_else(|| panic!("no bench line in {out}"));
+    line.split_whitespace().nth(4).unwrap().parse().unwrap()
+}
+
+#[test]
+fn bench_reports_nodes_and_is_deterministic() {
+    let first = bench_nodes(&session("bench 3\n"));
+    let second = bench_nodes(&session("bench 3\n"));
+    assert!(first > 0);
+    assert_eq!(first, second, "the node count is a signature of the search");
 }

@@ -144,3 +144,20 @@ fn random_nets_are_deterministic_and_within_the_training_clips() {
     assert!(a.l1_weight.iter().all(|w| w.unsigned_abs() <= 127));
     assert!(a.l2_weight.iter().all(|w| w.unsigned_abs() <= 127));
 }
+
+#[test]
+fn to_bytes_round_trips() {
+    let net = Network::random(3);
+    let bytes = net.to_bytes();
+    assert_eq!(bytes.len(), FILE_SIZE);
+    let back = Network::from_bytes(&bytes).unwrap();
+    assert_eq!(back.ft_weight, net.ft_weight);
+    assert_eq!(back.ft_bias, net.ft_bias);
+    assert_eq!(back.l1_weight, net.l1_weight);
+    assert_eq!(back.l1_bias, net.l1_bias);
+    assert_eq!(back.l2_weight, net.l2_weight);
+    assert_eq!(back.l2_bias, net.l2_bias);
+    assert_eq!(back.out_weight, net.out_weight);
+    assert_eq!(back.out_bias, net.out_bias);
+    assert_eq!(back.to_bytes(), bytes);
+}

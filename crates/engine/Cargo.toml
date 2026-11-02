@@ -16,5 +16,6 @@ path = "src/main.rs"
 
 [dependencies]
 eval.workspace = true
+nnue.workspace = true
 search.workspace = true
 shakmaty.workspace = true

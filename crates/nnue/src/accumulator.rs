@@ -1,11 +1,17 @@
-//! The accumulator: exercises N1 (refresh) and N2 (update). See
-//! `docs/exercises/n1-refresh-and-forward.md` and
-//! `docs/exercises/n2-incremental-update.md`; the specs are
-//! `tests/verify.rs` and `tests/incremental.rs`.
+//! The accumulator: the first layer of the net, kept up to date move by move.
+//!
+//! The first layer is by far the biggest (41,024 inputs, 256 outputs), but
+//! a move changes only two or three of its inputs. So instead of computing it
+//! at every position, the search keeps its output (the accumulator) and
+//! adjusts it by those few inputs after each move. That is the "efficiently
+//! updatable" in NNUE. `tests/verify.rs` checks a refresh against
+//! almoNnuet's values; `tests/incremental.rs` checks that an update always
+//! equals a refresh.
 
 use eval::DirtyPieces;
-use shakmaty::{Board, Chess, Color};
+use shakmaty::{Board, Chess, Color, Position, Role, Square};
 
+use crate::features::{active_features, feature_index};
 use crate::{L1, Network};
 
 /// The feature transformer's output for both perspectives: `ft_bias` plus the
@@ -21,46 +27,109 @@ pub struct Accumulator {
 
 impl Accumulator {
     /// One perspective's half.
-    pub fn half(&self, persp: Color) -> &[i16; L1] {
-        match persp {
+    pub fn half(&self, perspective: Color) -> &[i16; L1] {
+        match perspective {
             Color::White => &self.white,
             Color::Black => &self.black,
         }
     }
 
     /// One perspective's half, mutably.
-    pub fn half_mut(&mut self, persp: Color) -> &mut [i16; L1] {
-        match persp {
+    pub fn half_mut(&mut self, perspective: Color) -> &mut [i16; L1] {
+        match perspective {
             Color::White => &mut self.white,
             Color::Black => &mut self.black,
         }
     }
 
-    /// N1: both halves from scratch.
-    pub fn refresh(net: &Network, pos: &Chess) -> Self {
-        // Hint: start from zeros and let refresh_half fill each perspective.
-        let _ = (net, pos);
-        todo!()
+    /// Both halves from scratch.
+    pub fn refresh(net: &Network, position: &Chess) -> Self {
+        let mut accumulator = Accumulator {
+            white: [0; L1],
+            black: [0; L1],
+        };
+        for perspective in [Color::White, Color::Black] {
+            accumulator.refresh_half(net, position.board(), perspective);
+        }
+        accumulator
     }
 
-    /// N1: recompute `persp`'s half from scratch: the bias plus one row per
-    /// feature in `features::active_features(board, persp)`. N2 calls it when
-    /// `persp`'s own king moved.
-    pub fn refresh_half(&mut self, net: &Network, board: &Board, persp: Color) {
-        let _ = (self, net, board, persp);
-        todo!()
+    /// Recompute `perspective`'s half from scratch: the bias plus one row per
+    /// feature in `features::active_features(board, perspective)`. Also used
+    /// by `update` when `perspective`'s own king moved.
+    pub fn refresh_half(&mut self, net: &Network, board: &Board, perspective: Color) {
+        let half = self.half_mut(perspective);
+        *half = net.ft_bias;
+        for feature in active_features(board, perspective) {
+            add_row(half, net.ft_row(feature));
+        }
     }
 
-    /// N2: the accumulator after the move whose disturbed pieces are `dirty`,
+    /// The accumulator after the move whose disturbed pieces are `dirty`,
     /// computed from this one (the accumulator before the move). `after` is
     /// the position after the move: it knows where the kings now stand.
     #[must_use]
     pub fn update(&self, net: &Network, after: &Chess, dirty: &DirtyPieces) -> Self {
-        // Hint: per perspective, a king among the dirty pieces of that colour
-        // means refresh_half; otherwise, skipping kings (which have no row),
-        // subtract the row of every piece that left a square and add the row
-        // of every piece that arrived.
-        let _ = (self, net, after, dirty);
-        todo!()
+        let mut updated = self.clone();
+        for perspective in [Color::White, Color::Black] {
+            if own_king_moved(dirty, perspective) {
+                // Every feature of this side depends on its own king's
+                // square, so all of them change: start again from scratch.
+                updated.refresh_half(net, after.board(), perspective);
+            } else {
+                let king = after
+                    .board()
+                    .king_of(perspective)
+                    .expect("a legal position has both kings");
+                apply_dirty_pieces(updated.half_mut(perspective), net, dirty, king, perspective);
+            }
+        }
+        updated
+    }
+}
+
+/// Add a feature's row of weights to one half. Plain `i16` addition: the
+/// training clips every weight so that a half stays within ±8128, so an
+/// overflow (which panics in a debug build) can only mean a bug.
+fn add_row(half: &mut [i16; L1], row: &[i16; L1]) {
+    for (value, weight) in half.iter_mut().zip(row) {
+        *value += weight;
+    }
+}
+
+fn own_king_moved(dirty: &DirtyPieces, perspective: Color) -> bool {
+    dirty
+        .iter()
+        .any(|moved| moved.piece.role == Role::King && moved.piece.color == perspective)
+}
+
+/// Subtract the row of every piece that left a square, add the row of every
+/// piece that arrived. Kings are skipped: they have no feature of their own.
+fn apply_dirty_pieces(
+    half: &mut [i16; L1],
+    net: &Network,
+    dirty: &DirtyPieces,
+    king: Square,
+    perspective: Color,
+) {
+    for moved in dirty.iter().filter(|moved| moved.piece.role != Role::King) {
+        if let Some(from) = moved.from {
+            subtract_row(
+                half,
+                net.ft_row(feature_index(moved.piece, from, king, perspective)),
+            );
+        }
+        if let Some(to) = moved.to {
+            add_row(
+                half,
+                net.ft_row(feature_index(moved.piece, to, king, perspective)),
+            );
+        }
+    }
+}
+
+fn subtract_row(half: &mut [i16; L1], row: &[i16; L1]) {
+    for (value, weight) in half.iter_mut().zip(row) {
+        *value -= weight;
     }
 }

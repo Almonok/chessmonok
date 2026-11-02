@@ -3,12 +3,23 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+// The net's shape, in the usual NNUE names: layer `Lk` has `Lk` values.
+/// Inputs: every (own king square, piece, square) a side can see.
 pub const L0: usize = 41_024;
+/// The accumulator, per side: the output of the first (feature) layer.
 pub const L1: usize = 256;
+/// The first hidden layer.
 pub const L2: usize = 32;
+/// The second hidden layer.
 pub const L3: usize = 32;
+
+// Quantisation: the net was trained in floating point and is run in
+// integers, each float multiplied by a fixed scale and rounded.
+/// Scale of the activations (and of the feature layer): 1.0 is stored as 127.
 pub const QA: i32 = 127;
+/// Scale of the hidden layers' weights: 1.0 is stored as 64.
 pub const QB: i32 = 64;
+/// Centipawns per unit of the net's output.
 pub const OUT_SCALE: i32 = 600;
 
 /// What `feature_set_hash` in the header is the FNV-1a hash of.
@@ -40,7 +51,7 @@ pub struct Network {
     /// `L0` rows of `L1`, feature-major: row `f` holds feature `f`'s weights.
     pub ft_weight: Box<[i16]>,
     pub ft_bias: [i16; L1],
-    /// `L2` rows of `2 * L1`: row `o` holds output `o`'s weights, stm half first.
+    /// `L2` rows of `2 * L1`: row `o` holds output `o`'s weights, the side to move's half first.
     pub l1_weight: Box<[i8]>,
     pub l1_bias: [i32; L2],
     /// `L3` rows of `L2`.
@@ -138,6 +149,33 @@ impl Network {
         })
     }
 
+    /// The `.nnue` file for this net: the exact bytes `from_bytes` reads.
+    /// Lets tests write a random net to disk for the engine to load.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(FILE_SIZE);
+        bytes.extend_from_slice(&MAGIC);
+        bytes.extend_from_slice(&VERSION.to_le_bytes());
+        bytes.extend_from_slice(&fnv1a32(FEATURE_SET.as_bytes()).to_le_bytes());
+        bytes.extend_from_slice(&fnv1a32(ARCH.as_bytes()).to_le_bytes());
+        let [l0, l1, l2, l3, qa, qb, out_scale] = DIMS;
+        for size in [l0, l1, l2, l3] {
+            bytes.extend_from_slice(&(size as u16).to_le_bytes());
+        }
+        bytes.push(qa as u8);
+        bytes.push(qb as u8);
+        bytes.extend_from_slice(&(out_scale as u16).to_le_bytes());
+        bytes.resize(HEADER_SIZE, 0); // reserved
+        extend_le(&mut bytes, &self.ft_weight, i16::to_le_bytes);
+        extend_le(&mut bytes, &self.ft_bias, i16::to_le_bytes);
+        extend_le(&mut bytes, &self.l1_weight, i8::to_le_bytes);
+        extend_le(&mut bytes, &self.l1_bias, i32::to_le_bytes);
+        extend_le(&mut bytes, &self.l2_weight, i8::to_le_bytes);
+        extend_le(&mut bytes, &self.l2_bias, i32::to_le_bytes);
+        extend_le(&mut bytes, &self.out_weight, i16::to_le_bytes);
+        extend_le(&mut bytes, &[self.out_bias], i32::to_le_bytes);
+        bytes
+    }
+
     /// A deterministic random net within the training clips (|ft| <= 254,
     /// |hidden| <= 127), for tests that must not need the real file.
     pub fn random(seed: u64) -> Self {
@@ -161,6 +199,17 @@ impl Network {
         self.ft_weight[feature * L1..(feature + 1) * L1]
             .try_into()
             .expect("rows are L1 long")
+    }
+}
+
+/// Append each value of `values` in little-endian order.
+fn extend_le<T: Copy, const BYTES: usize>(
+    bytes: &mut Vec<u8>,
+    values: &[T],
+    to_le_bytes: fn(T) -> [u8; BYTES],
+) {
+    for &value in values {
+        bytes.extend_from_slice(&to_le_bytes(value));
     }
 }
 

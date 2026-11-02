@@ -6,11 +6,14 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use eval::MaterialEval;
+use eval::{Evaluator, MaterialEval};
 use search::{Limits, MATE, MAX_PLY, SearchResult, Searcher};
 use shakmaty::fen::Fen;
 use shakmaty::uci::UciMove;
 use shakmaty::{CastlingMode, Chess, Move, Position};
+
+use crate::bench::{DEFAULT_DEPTH, run_bench};
+use crate::evaluation::Evaluation;
 
 type Out<W> = Arc<Mutex<W>>;
 
@@ -32,6 +35,7 @@ struct Engine<W> {
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
     random_mover: bool,
+    evaluation: Evaluation,
 }
 
 impl<W: Write + Send + 'static> Engine<W> {
@@ -42,6 +46,7 @@ impl<W: Write + Send + 'static> Engine<W> {
             stop: Arc::new(AtomicBool::new(false)),
             worker: None,
             random_mover: false,
+            evaluation: Evaluation::Material,
         }
     }
 
@@ -55,6 +60,10 @@ impl<W: Write + Send + 'static> Engine<W> {
                     &self.out,
                     "option name RandomMover type check default false",
                 );
+                send(
+                    &self.out,
+                    "option name EvalFile type string default <empty>",
+                );
                 send(&self.out, "uciok");
             }
             Some("isready") => send(&self.out, "readyok"),
@@ -62,7 +71,7 @@ impl<W: Write + Send + 'static> Engine<W> {
                 self.stop_search();
                 self.pos = Chess::default();
             }
-            Some("setoption") => self.set_option(&tokens.collect::<Vec<_>>()),
+            Some("setoption") => self.set_option(line),
             Some("position") => {
                 self.stop_search();
                 match parse_position(&tokens.collect::<Vec<_>>()) {
@@ -74,6 +83,11 @@ impl<W: Write + Send + 'static> Engine<W> {
                 self.stop_search();
                 self.go(parse_go(&tokens.collect::<Vec<_>>()));
             }
+            Some("bench") => {
+                self.stop_search();
+                let depth = tokens.next().and_then(|depth| depth.parse().ok());
+                self.bench(depth.unwrap_or(DEFAULT_DEPTH));
+            }
             Some("stop") => self.stop_search(),
             Some("quit") => return false,
             _ => {}
@@ -81,30 +95,85 @@ impl<W: Write + Send + 'static> Engine<W> {
         true
     }
 
-    fn set_option(&mut self, tokens: &[&str]) {
-        if let ["name", "RandomMover", "value", value] = tokens {
+    fn set_option(&mut self, line: &str) {
+        let Some((name, value)) = parse_set_option(line) else {
+            return;
+        };
+        // UCI option names are case-insensitive.
+        if name.eq_ignore_ascii_case("RandomMover") {
             self.random_mover = value.eq_ignore_ascii_case("true");
+        } else if name.eq_ignore_ascii_case("EvalFile") {
+            self.load_eval_file(value);
         }
     }
 
+    fn load_eval_file(&mut self, path: &str) {
+        self.stop_search();
+        self.evaluation = Evaluation::from_eval_file(path);
+        match &self.evaluation {
+            Evaluation::Material => {}
+            Evaluation::Nnue { file, .. } => send(&self.out, &format!("info string loaded {file}")),
+            Evaluation::Broken { .. } => {
+                send(
+                    &self.out,
+                    &format!("info string {}", self.evaluation.describe()),
+                );
+            }
+        }
+    }
+
+    /// `bench [depth]`, a non-standard command: see `bench.rs`.
+    fn bench(&mut self, depth: u32) {
+        let Some(result) = run_bench(&self.evaluation, depth) else {
+            let refusal = format!("info string cannot bench: {}", self.evaluation.describe());
+            send(&self.out, &refusal);
+            return;
+        };
+        send(
+            &self.out,
+            &format!("info string bench with {}", self.evaluation.describe()),
+        );
+        send(
+            &self.out,
+            &format!(
+                "info string bench nodes {} nps {} time {}",
+                result.nodes,
+                result.nodes_per_second(),
+                result.elapsed.as_millis()
+            ),
+        );
+    }
+
     fn go(&mut self, limits: Limits) {
+        if let Evaluation::Broken { .. } = &self.evaluation {
+            let refusal = format!("info string cannot search: {}", self.evaluation.describe());
+            send(&self.out, &refusal);
+            send(&self.out, "bestmove 0000");
+            return;
+        }
+        send(
+            &self.out,
+            &format!("info string {}", self.evaluation.describe()),
+        );
         self.stop = Arc::new(AtomicBool::new(false));
-        let (out, pos, stop, random) = (
+        let (out, pos, stop, random, evaluation) = (
             Arc::clone(&self.out),
             self.pos.clone(),
             Arc::clone(&self.stop),
             self.random_mover,
+            self.evaluation.clone(),
         );
         self.worker = Some(thread::spawn(move || {
             let best = if random {
                 random_move(&pos)
             } else {
-                let start = Instant::now();
-                Searcher::new(MaterialEval)
-                    .search_with(&pos, &limits, &stop, |r| {
-                        send(&out, &info_line(r, start.elapsed()));
-                    })
-                    .best_move
+                match evaluation {
+                    Evaluation::Material => search(MaterialEval, &pos, &limits, &stop, &out),
+                    Evaluation::Nnue { evaluator, .. } => {
+                        search(evaluator, &pos, &limits, &stop, &out)
+                    }
+                    Evaluation::Broken { .. } => None,
+                }
             };
             let text = best.map_or_else(
                 || "0000".to_string(),
@@ -123,6 +192,38 @@ impl<W: Write + Send + 'static> Engine<W> {
         if let Some(worker) = self.worker.take() {
             worker.join().expect("search thread panicked");
         }
+    }
+}
+
+/// Search `position` with `evaluator`, reporting each finished depth.
+/// Generic, so each evaluator gets its own compiled copy of the search.
+fn search<E: Evaluator, W: Write>(
+    evaluator: E,
+    position: &Chess,
+    limits: &Limits,
+    stop: &AtomicBool,
+    out: &Out<W>,
+) -> Option<Move> {
+    let start = Instant::now();
+    Searcher::new(evaluator)
+        .search_with(position, limits, stop, |result| {
+            send(out, &info_line(result, start.elapsed()));
+        })
+        .best_move
+}
+
+/// `setoption name <name> [value <value>]`, as `(name, value)`. The name may
+/// contain spaces; the value is the rest of the line after the spaces that
+/// follow `value`, inner spaces included (a path), and empty when absent.
+fn parse_set_option(line: &str) -> Option<(&str, &str)> {
+    let rest = line
+        .strip_prefix("setoption")?
+        .trim_start()
+        .strip_prefix("name")?
+        .trim_start();
+    match rest.split_once(" value") {
+        Some((name, value)) => Some((name.trim(), value.trim_start())),
+        None => Some((rest.trim(), "")),
     }
 }
 

@@ -1,4 +1,4 @@
-//! Placeholder alpha-beta for chessmonok: replaced piece by piece in the S exercises.
+//! Alpha-beta search for chessmonok.
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};

@@ -8,8 +8,8 @@ use shakmaty::{Board, Color, Piece, Role, Square};
 pub const KING_STRIDE: usize = 641;
 
 /// Black sees the board flipped vertically.
-pub fn orient(square: Square, persp: Color) -> usize {
-    match persp {
+pub fn orient(square: Square, perspective: Color) -> usize {
+    match perspective {
         Color::White => square.to_usize(),
         Color::Black => square.to_usize() ^ 0b11_1000, // flip the three rank bits
     }
@@ -17,25 +17,28 @@ pub fn orient(square: Square, persp: Color) -> usize {
 
 /// 0..=9: twice the piece type, plus one for the enemy's pieces. Kings have
 /// no feature.
-pub fn piece_index(piece: Piece, persp: Color) -> usize {
+pub fn piece_index(piece: Piece, perspective: Color) -> usize {
     assert_ne!(piece.role, Role::King, "kings have no feature");
-    2 * (piece.role as usize - 1) + usize::from(piece.color != persp)
+    2 * (piece.role as usize - 1) + usize::from(piece.color != perspective)
 }
 
-/// The feature `persp` sees for `piece` on `square`, its own king on `king`.
-pub fn feature_index(piece: Piece, square: Square, king: Square, persp: Color) -> usize {
-    orient(king, persp) * KING_STRIDE + piece_index(piece, persp) * 64 + orient(square, persp) + 1
+/// The feature `perspective` sees for `piece` on `square`, its own king on `king`.
+pub fn feature_index(piece: Piece, square: Square, king: Square, perspective: Color) -> usize {
+    orient(king, perspective) * KING_STRIDE
+        + piece_index(piece, perspective) * 64
+        + orient(square, perspective)
+        + 1
 }
 
-/// Every feature `persp` sees on `board`, sorted ascending.
-pub fn active_features(board: &Board, persp: Color) -> Vec<usize> {
+/// Every feature `perspective` sees on `board`, sorted ascending.
+pub fn active_features(board: &Board, perspective: Color) -> Vec<usize> {
     let king = board
-        .king_of(persp)
+        .king_of(perspective)
         .expect("a legal position has both kings");
     let mut features: Vec<usize> = board
         .iter()
         .filter(|(_, piece)| piece.role != Role::King)
-        .map(|(square, piece)| feature_index(piece, square, king, persp))
+        .map(|(square, piece)| feature_index(piece, square, king, perspective))
         .collect();
     features.sort_unstable();
     features

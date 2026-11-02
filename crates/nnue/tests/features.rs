@@ -64,13 +64,13 @@ fn hand_computed_indices_match_almonnuet() {
 
 #[test]
 fn indices_are_injective_and_in_range_per_perspective() {
-    for persp in [White, Black] {
+    for perspective in [White, Black] {
         let mut seen = HashSet::new();
         for king in Square::ALL {
             for color in [White, Black] {
                 for role in ROLES {
                     for sq in Square::ALL {
-                        let index = feature_index(piece(color, role), sq, king, persp);
+                        let index = feature_index(piece(color, role), sq, king, perspective);
                         assert!((1..L0).contains(&index));
                         assert!(seen.insert(index), "{index} produced twice");
                     }
@@ -84,8 +84,8 @@ fn indices_are_injective_and_in_range_per_perspective() {
 #[test]
 fn the_start_position_has_thirty_sorted_features_per_side() {
     let start = Chess::default();
-    for persp in [White, Black] {
-        let features = active_features(start.board(), persp);
+    for perspective in [White, Black] {
+        let features = active_features(start.board(), perspective);
         assert_eq!(features.len(), 30);
         assert!(features.is_sorted());
     }
