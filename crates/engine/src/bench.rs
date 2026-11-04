@@ -72,8 +72,9 @@ fn run_bench_on(evaluation: &Evaluation, depth: u32, positions: &[&str]) -> Opti
     })
 }
 
-/// Each position is searched by a fresh `Searcher`, so no position's search
-/// depends on the one before it.
+/// Each position is searched by a fresh `Searcher` with its own empty
+/// transposition table, so no position's search depends on the one before
+/// it, and the node total does not depend on the order of the positions.
 fn total_nodes<E: Evaluator + Clone>(evaluator: &E, depth: u32, positions: &[&str]) -> u64 {
     let limits = Limits {
         depth: Some(depth),

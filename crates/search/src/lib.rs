@@ -1,16 +1,40 @@
 //! Alpha-beta search for chessmonok.
+//!
+//! Iterative deepening runs a negamax alpha-beta search to depth 1, 2, 3...
+//! until the time or depth limit, with a capture-only quiescence search at
+//! the leaves. A transposition table (`transposition`), shared across
+//! searches, remembers each node's result: it orders the remembered best move
+//! first and ends the search of a node that was already searched deep enough.
+
+mod position_key;
+mod transposition;
 
 use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use eval::{Evaluator, dirty_pieces};
 use shakmaty::{Chess, Color, Move, MoveList, Position};
 
+pub use position_key::{key_after, position_key};
+pub use transposition::{
+    Bound, DEFAULT_HASH_MEGABYTES, MAX_HASH_MEGABYTES, PackedMove, TableEntry, TranspositionTable,
+    score_from_table, score_to_table,
+};
+
 pub const MATE: i32 = 30_000;
 pub const MAX_PLY: usize = 128;
 const INF: i32 = 32_000;
 const MAX_DEPTH: u32 = 64;
+
+/// Scores at least this far from zero are mates: the search never goes deeper
+/// than `MAX_PLY`, so a mate is never further than that from `MATE`.
+#[allow(
+    clippy::cast_possible_wrap,
+    reason = "MAX_PLY is 128, far below i32::MAX"
+)]
+const MATE_BOUND: i32 = MATE - MAX_PLY as i32;
 
 #[derive(Clone, Debug, Default)]
 pub struct Limits {
@@ -47,7 +71,13 @@ pub fn time_budget(limits: &Limits, turn: Color) -> Option<Duration> {
 pub struct Searcher<E: Evaluator> {
     eval: E,
     states: Vec<E::State>,
+    /// The Zobrist key of the position at each ply of the current line, kept
+    /// up to date move by move like `states`.
+    keys: Vec<u64>,
     pv: Vec<Vec<Move>>,
+    /// Shared, not owned: the engine keeps one table across `go` commands so
+    /// each search starts from what the previous ones learnt.
+    table: Arc<TranspositionTable>,
     nodes: u64,
     deadline: Option<Instant>,
     can_abort: bool,
@@ -58,16 +88,28 @@ impl<E: Evaluator> fmt::Debug for Searcher<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Searcher")
             .field("nodes", &self.nodes)
+            .field("table", &self.table)
             .finish_non_exhaustive()
     }
 }
 
 impl<E: Evaluator> Searcher<E> {
+    /// A searcher with its own, empty table of the default size.
     pub fn new(eval: E) -> Self {
+        Self::with_table(
+            eval,
+            Arc::new(TranspositionTable::new(DEFAULT_HASH_MEGABYTES)),
+        )
+    }
+
+    /// A searcher that reads and writes `table`, which outlives it.
+    pub fn with_table(eval: E, table: Arc<TranspositionTable>) -> Self {
         Self {
             eval,
             states: Vec::new(),
+            keys: Vec::new(),
             pv: Vec::new(),
+            table,
             nodes: 0,
             deadline: None,
             can_abort: false,
@@ -89,7 +131,10 @@ impl<E: Evaluator> Searcher<E> {
         self.deadline = time_budget(limits, pos.turn()).map(|budget| Instant::now() + budget);
         self.nodes = 0;
         self.states = vec![self.eval.refresh(pos); MAX_PLY + 1];
+        self.keys = vec![0; MAX_PLY + 1];
+        self.keys[0] = position_key(pos);
         self.pv = vec![Vec::new(); MAX_PLY + 1];
+        self.table.new_search();
         let mut best = SearchResult {
             best_move: None,
             score: 0,
@@ -146,22 +191,38 @@ impl<E: Evaluator> Searcher<E> {
         if ply > 0 && (pos.halfmoves() >= 100 || pos.is_insufficient_material()) {
             return 0;
         }
+        let key = self.keys[ply];
+        let remembered = self.table.probe(key);
+        // Never at the root: the root must produce a move and a PV, which a
+        // stored score alone does not give.
+        if ply > 0 {
+            if let Some(score) =
+                remembered.and_then(|entry| table_cutoff(entry, depth, ply, alpha, beta))
+            {
+                return score;
+            }
+        }
         let mut moves = pos.legal_moves();
         if moves.is_empty() {
             return if pos.is_check() { mated(ply) } else { 0 };
         }
-        order(&mut moves);
+        order(&mut moves, remembered.and_then(|entry| entry.best_move));
+        let alpha_on_entry = alpha;
         let mut best = -INF;
+        let mut best_move = None;
         for &m in &moves {
             let child = self.play(pos, m, ply);
             let score = -self.negamax(&child, depth - 1, ply + 1, -beta, -alpha, stop);
             if self.aborted {
+                // The scores of an unfinished subtree are not results: nothing
+                // from here on reaches the table.
                 return 0;
             }
             if score > best {
                 best = score;
                 if score > alpha {
                     alpha = score;
+                    best_move = Some(m);
                     self.set_pv(ply, m);
                 }
             }
@@ -169,6 +230,15 @@ impl<E: Evaluator> Searcher<E> {
                 break;
             }
         }
+        self.table.store(
+            key,
+            TableEntry {
+                best_move: best_move.map(PackedMove::new),
+                score: score_to_table(best, ply),
+                depth,
+                bound: bound_of(best, alpha_on_entry, beta),
+            },
+        );
         best
     }
 
@@ -207,7 +277,7 @@ impl<E: Evaluator> Searcher<E> {
             alpha = alpha.max(stand);
             best = stand;
         }
-        order(&mut moves);
+        order(&mut moves, None);
         for &m in &moves {
             let child = self.play(pos, m, ply);
             let score = -self.quiesce(&child, ply + 1, -beta, -alpha, stop);
@@ -233,6 +303,7 @@ impl<E: Evaluator> Searcher<E> {
         let mut child = pos.clone();
         child.play_unchecked(m);
         self.states[ply + 1] = self.eval.update(&self.states[ply], &child, &dirty);
+        self.keys[ply + 1] = key_after(pos, self.keys[ply], m, &child);
         child
     }
 
@@ -249,18 +320,68 @@ impl<E: Evaluator> Searcher<E> {
     }
 }
 
+/// The score a remembered entry lets this node return without searching, if
+/// it was searched at least `depth` deep and its bound settles the window.
+///
+/// This cuts at every node below the root, PV nodes included. Plain
+/// alpha-beta searches nearly every node with a wide window, so restricting
+/// cutoffs to zero-window ("non-PV") nodes, as engines with principal
+/// variation search do, would leave almost nothing to cut. The cost is that a
+/// cutoff ends the reported PV early at that node.
+fn table_cutoff(entry: TableEntry, depth: u32, ply: usize, alpha: i32, beta: i32) -> Option<i32> {
+    if entry.depth < depth {
+        return None;
+    }
+    let score = score_from_table(entry.score, ply);
+    let settled = match entry.bound {
+        Bound::Exact => true,
+        Bound::Lower => score >= beta,
+        Bound::Upper => score <= alpha,
+    };
+    settled.then_some(score)
+}
+
+/// What `best` says about the true value, given the window it was searched
+/// with (see the diagram in `transposition`).
+fn bound_of(best: i32, alpha_on_entry: i32, beta: i32) -> Bound {
+    if best >= beta {
+        Bound::Lower
+    } else if best > alpha_on_entry {
+        Bound::Exact
+    } else {
+        Bound::Upper
+    }
+}
+
+/// A ply count as a score offset: mate scores move by one per ply.
+fn ply_offset(ply: usize) -> i32 {
+    i32::try_from(ply).expect("ply fits in i32")
+}
+
 fn mated(ply: usize) -> i32 {
-    -MATE + i32::try_from(ply).expect("ply fits in i32")
+    -MATE + ply_offset(ply)
 }
 
 fn is_mate(score: i32) -> bool {
-    score.abs() >= MATE - i32::try_from(MAX_PLY).expect("MAX_PLY fits in i32")
+    score.abs() >= MATE_BOUND
 }
 
-fn order(moves: &mut MoveList) {
+/// The remembered best move first, then captures by most valuable victim and
+/// least valuable attacker (MVV-LVA), promotions among them.
+fn order(moves: &mut MoveList, remembered: Option<PackedMove>) {
     moves.sort_by_key(|m| {
         let victim = m.capture().map_or(0, |r| r as i32 * 10);
         let promotion = m.promotion().map_or(0, |r| r as i32 * 10);
         -(victim + promotion - m.role() as i32)
     });
+    // The packed move is only a hint (it could come from another position
+    // that shares the key): it is used only if it is one of the legal moves.
+    let remembered_index = remembered.and_then(|remembered| {
+        moves
+            .iter()
+            .position(|&candidate| PackedMove::new(candidate) == remembered)
+    });
+    if let Some(index) = remembered_index {
+        moves[..=index].rotate_right(1);
+    }
 }

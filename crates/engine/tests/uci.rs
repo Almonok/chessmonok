@@ -43,6 +43,29 @@ fn handshake() {
     let ready = out.find("readyok").unwrap();
     assert!(id < ok && ok < ready);
     assert!(out.contains("option name RandomMover type check default false"));
+    assert!(out.contains("option name Hash type spin default 16 min 1 max 1024"));
+}
+
+#[test]
+fn searches_with_a_resized_table_and_reports_its_fill() {
+    let out = session("setoption name Hash value 1\nposition startpos\ngo depth 4\n");
+    assert!(!out.contains("info string Hash"), "{out}");
+    let deepest = out
+        .lines()
+        .find(|line| line.starts_with("info depth 4 "))
+        .expect("an info line for depth 4");
+    assert!(deepest.contains(" hashfull "), "{deepest}");
+    assert!(is_legal(&Chess::default(), bestmove(&out)));
+}
+
+#[test]
+fn a_hash_that_is_not_a_number_is_reported() {
+    let out = session("setoption name Hash value lots\nposition startpos\ngo depth 1\n");
+    assert!(
+        out.contains("info string Hash: not a number: lots"),
+        "{out}"
+    );
+    assert!(is_legal(&Chess::default(), bestmove(&out)));
 }
 
 #[test]

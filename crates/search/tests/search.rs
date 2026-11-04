@@ -1,8 +1,9 @@
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use eval::MaterialEval;
-use search::{Limits, MATE, SearchResult, Searcher, time_budget};
+use search::{Limits, MATE, SearchResult, Searcher, TranspositionTable, time_budget};
 use shakmaty::fen::Fen;
 use shakmaty::{CastlingMode, Chess, Color, Move, Position};
 
@@ -24,6 +25,21 @@ fn run(fen: &str, depth: u32) -> SearchResult {
     };
     Searcher::new(MaterialEval).search(&pos(fen), &limits, &AtomicBool::new(false))
 }
+
+/// Like `run`, but reading and writing a table that outlives the search.
+fn run_with_table(table: &Arc<TranspositionTable>, fen: &str, depth: u32) -> SearchResult {
+    let limits = Limits {
+        depth: Some(depth),
+        ..Limits::default()
+    };
+    Searcher::with_table(MaterialEval, Arc::clone(table)).search(
+        &pos(fen),
+        &limits,
+        &AtomicBool::new(false),
+    )
+}
+
+const KIWIPETE: &str = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
 
 #[test]
 fn finds_mate_in_one() {
@@ -166,4 +182,46 @@ fn budget_never_exceeds_a_quarter_of_the_clock() {
 #[test]
 fn budget_is_none_without_a_clock() {
     assert_eq!(time_budget(&Limits::default(), Color::White), None);
+}
+
+#[test]
+fn a_warm_table_saves_most_of_the_work() {
+    let table = Arc::new(TranspositionTable::new(16));
+    let cold = run_with_table(&table, KIWIPETE, 5);
+    let warm = run_with_table(&table, KIWIPETE, 5);
+    assert!(
+        warm.nodes * 4 < cold.nodes,
+        "cold {} nodes, warm {} nodes",
+        cold.nodes,
+        warm.nodes
+    );
+    assert!(
+        pos(KIWIPETE)
+            .legal_moves()
+            .contains(&warm.best_move.unwrap())
+    );
+}
+
+#[test]
+fn a_mate_remembered_at_another_ply_keeps_its_true_distance() {
+    // The first search stores "mate in 1" for the position after 1.Kb6 Kb8,
+    // two plies below its root. The second search starts one ply later
+    // (after 1.Kb6), so it meets that position one ply below its root: the
+    // mate must now read as 2 plies away for black, not 3.
+    let table = Arc::new(TranspositionTable::new(1));
+    let first = run_with_table(&table, "k7/8/2K5/8/8/8/8/7R w - - 0 1", 4);
+    assert_eq!(first.score, MATE - 3);
+    let later = run_with_table(&table, "k7/8/1K6/8/8/8/8/7R b - - 1 1", 4);
+    assert_eq!(later.score, -(MATE - 2));
+}
+
+#[test]
+fn a_cleared_table_searches_like_a_fresh_one() {
+    let table = Arc::new(TranspositionTable::new(1));
+    let fresh = run_with_table(&table, KIWIPETE, 4);
+    run_with_table(&table, KIWIPETE, 4);
+    table.clear();
+    let after_clear = run_with_table(&table, KIWIPETE, 4);
+    assert_eq!(fresh.nodes, after_clear.nodes);
+    assert_eq!(fresh.best_move, after_clear.best_move);
 }

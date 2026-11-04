@@ -7,7 +7,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use eval::{Evaluator, MaterialEval};
-use search::{Limits, MATE, MAX_PLY, SearchResult, Searcher};
+use search::{
+    DEFAULT_HASH_MEGABYTES, Limits, MATE, MAX_HASH_MEGABYTES, MAX_PLY, SearchResult, Searcher,
+    TranspositionTable,
+};
 use shakmaty::fen::Fen;
 use shakmaty::uci::UciMove;
 use shakmaty::{CastlingMode, Chess, Move, Position};
@@ -36,6 +39,11 @@ struct Engine<W> {
     worker: Option<JoinHandle<()>>,
     random_mover: bool,
     evaluation: Evaluation,
+    /// One table for the whole session, so each `go` reuses what the
+    /// previous searches learnt (in a game, most of the next move's tree was
+    /// already searched while thinking about this one). An `Arc` because the
+    /// search runs on its own thread.
+    table: Arc<TranspositionTable>,
 }
 
 impl<W: Write + Send + 'static> Engine<W> {
@@ -47,6 +55,7 @@ impl<W: Write + Send + 'static> Engine<W> {
             worker: None,
             random_mover: false,
             evaluation: Evaluation::Material,
+            table: Arc::new(TranspositionTable::new(DEFAULT_HASH_MEGABYTES)),
         }
     }
 
@@ -64,12 +73,19 @@ impl<W: Write + Send + 'static> Engine<W> {
                     &self.out,
                     "option name EvalFile type string default <empty>",
                 );
+                send(
+                    &self.out,
+                    &format!(
+                        "option name Hash type spin default {DEFAULT_HASH_MEGABYTES} min 1 max {MAX_HASH_MEGABYTES}"
+                    ),
+                );
                 send(&self.out, "uciok");
             }
             Some("isready") => send(&self.out, "readyok"),
             Some("ucinewgame") => {
                 self.stop_search();
                 self.pos = Chess::default();
+                self.table.clear();
             }
             Some("setoption") => self.set_option(line),
             Some("position") => {
@@ -104,7 +120,28 @@ impl<W: Write + Send + 'static> Engine<W> {
             self.random_mover = value.eq_ignore_ascii_case("true");
         } else if name.eq_ignore_ascii_case("EvalFile") {
             self.load_eval_file(value);
+        } else if name.eq_ignore_ascii_case("Hash") {
+            self.resize_table(value);
         }
+    }
+
+    /// `Hash` in MB, clamped to the advertised range; a value that is not a
+    /// number leaves the table as it is.
+    fn resize_table(&mut self, value: &str) {
+        let Ok(megabytes) = value.trim().parse::<usize>() else {
+            send(
+                &self.out,
+                &format!("info string Hash: not a number: {value}"),
+            );
+            return;
+        };
+        self.stop_search();
+        // Drop the old table before allocating the new one, so a resize
+        // never needs both in memory at once.
+        self.table = Arc::new(TranspositionTable::new(0));
+        self.table = Arc::new(TranspositionTable::new(
+            megabytes.clamp(1, MAX_HASH_MEGABYTES),
+        ));
     }
 
     fn load_eval_file(&mut self, path: &str) {
@@ -156,21 +193,24 @@ impl<W: Write + Send + 'static> Engine<W> {
             &format!("info string {}", self.evaluation.describe()),
         );
         self.stop = Arc::new(AtomicBool::new(false));
-        let (out, pos, stop, random, evaluation) = (
+        let (out, pos, stop, random, evaluation, table) = (
             Arc::clone(&self.out),
             self.pos.clone(),
             Arc::clone(&self.stop),
             self.random_mover,
             self.evaluation.clone(),
+            Arc::clone(&self.table),
         );
         self.worker = Some(thread::spawn(move || {
             let best = if random {
                 random_move(&pos)
             } else {
                 match evaluation {
-                    Evaluation::Material => search(MaterialEval, &pos, &limits, &stop, &out),
+                    Evaluation::Material => {
+                        search(MaterialEval, &pos, &limits, &stop, &out, &table)
+                    }
                     Evaluation::Nnue { evaluator, .. } => {
-                        search(evaluator, &pos, &limits, &stop, &out)
+                        search(evaluator, &pos, &limits, &stop, &out, &table)
                     }
                     Evaluation::Broken { .. } => None,
                 }
@@ -195,19 +235,22 @@ impl<W: Write + Send + 'static> Engine<W> {
     }
 }
 
-/// Search `position` with `evaluator`, reporting each finished depth.
-/// Generic, so each evaluator gets its own compiled copy of the search.
+/// Search `position` with `evaluator` and the session's `table`, reporting
+/// each finished depth. Generic, so each evaluator gets its own compiled copy
+/// of the search.
 fn search<E: Evaluator, W: Write>(
     evaluator: E,
     position: &Chess,
     limits: &Limits,
     stop: &AtomicBool,
     out: &Out<W>,
+    table: &Arc<TranspositionTable>,
 ) -> Option<Move> {
     let start = Instant::now();
-    Searcher::new(evaluator)
+    let mut searcher = Searcher::with_table(evaluator, Arc::clone(table));
+    searcher
         .search_with(position, limits, stop, |result| {
-            send(out, &info_line(result, start.elapsed()));
+            send(out, &info_line(result, start.elapsed(), table.hashfull()));
         })
         .best_move
 }
@@ -276,7 +319,8 @@ fn parse_go(tokens: &[&str]) -> Limits {
     limits
 }
 
-fn info_line(r: &SearchResult, elapsed: Duration) -> String {
+/// `hashfull` is the table's fill in per mille, as UCI reports it.
+fn info_line(r: &SearchResult, elapsed: Duration, hashfull: u32) -> String {
     let mate_bound = MATE - i32::try_from(MAX_PLY).expect("MAX_PLY fits in i32");
     let score = if r.score.abs() >= mate_bound {
         let moves = (MATE - r.score.abs() + 1) / 2;
@@ -291,7 +335,7 @@ fn info_line(r: &SearchResult, elapsed: Duration) -> String {
             .map(|m| m.to_uci(CastlingMode::Standard).to_string())
             .collect();
     format!(
-        "info depth {} score {score} nodes {} nps {nps} time {ms} pv {}",
+        "info depth {} score {score} nodes {} nps {nps} hashfull {hashfull} time {ms} pv {}",
         r.depth,
         r.nodes,
         pv.join(" ")
