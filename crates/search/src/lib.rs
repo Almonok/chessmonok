@@ -6,10 +6,12 @@
 //! searches, remembers each node's result: it orders the remembered best move
 //! first and ends the search of a node that was already searched deep enough.
 //! Null-move pruning (`null_move`) cuts nodes where even passing the turn
-//! keeps the side to move at beta.
+//! keeps the side to move at beta. A position that repeats an earlier one, in
+//! the game or in the searched line, scores as a draw (`repetition`).
 
 mod null_move;
 mod position_key;
+mod repetition;
 mod transposition;
 
 use std::fmt;
@@ -77,6 +79,9 @@ pub struct Searcher<E: Evaluator> {
     /// The Zobrist key of the position at each ply of the current line, kept
     /// up to date move by move like `states`.
     keys: Vec<u64>,
+    /// The keys of the game's positions before the root, oldest first: the
+    /// search line can repeat them too.
+    game_keys: Vec<u64>,
     /// Whether the move into each ply of the current line was a pass: a pass
     /// is never answered by another pass.
     passed: Vec<bool>,
@@ -114,6 +119,7 @@ impl<E: Evaluator> Searcher<E> {
             eval,
             states: Vec::new(),
             keys: Vec::new(),
+            game_keys: Vec::new(),
             passed: Vec::new(),
             pv: Vec::new(),
             table,
@@ -124,13 +130,19 @@ impl<E: Evaluator> Searcher<E> {
         }
     }
 
+    /// Search `pos` as if the game started there: no earlier position can be
+    /// repeated.
     pub fn search(&mut self, pos: &Chess, limits: &Limits, stop: &AtomicBool) -> SearchResult {
-        self.search_with(pos, limits, stop, |_| {})
+        self.search_with(pos, &[], limits, stop, |_| {})
     }
 
+    /// Search `pos`, reached through the positions whose keys are
+    /// `game_keys` (oldest first, `pos` itself excluded), calling `on_depth`
+    /// after each finished iteration.
     pub fn search_with(
         &mut self,
         pos: &Chess,
+        game_keys: &[u64],
         limits: &Limits,
         stop: &AtomicBool,
         mut on_depth: impl FnMut(&SearchResult),
@@ -140,6 +152,7 @@ impl<E: Evaluator> Searcher<E> {
         self.states = vec![self.eval.refresh(pos); MAX_PLY + 1];
         self.keys = vec![0; MAX_PLY + 1];
         self.keys[0] = position_key(pos);
+        self.game_keys = game_keys.to_vec();
         self.passed = vec![false; MAX_PLY + 1];
         self.pv = vec![Vec::new(); MAX_PLY + 1];
         self.table.new_search();
@@ -170,7 +183,7 @@ impl<E: Evaluator> Searcher<E> {
             };
             on_depth(&best);
             let out_of_time = self.deadline.is_some_and(|d| Instant::now() >= d);
-            if is_mate(score) || out_of_time || stop.load(Ordering::Relaxed) {
+            if is_shortest_mate(score, depth) || out_of_time || stop.load(Ordering::Relaxed) {
                 break;
             }
         }
@@ -196,7 +209,10 @@ impl<E: Evaluator> Searcher<E> {
             return 0;
         }
         self.nodes += 1;
-        if ply > 0 && (pos.halfmoves() >= 100 || pos.is_insufficient_material()) {
+        // Before the table: a repetition is a draw only on this path, so the
+        // table's score for the position, reached another way, must not
+        // hide it.
+        if ply > 0 && self.is_draw(pos, ply) {
             return 0;
         }
         let key = self.keys[ply];
@@ -311,6 +327,19 @@ impl<E: Evaluator> Searcher<E> {
             }
         }
         best
+    }
+
+    /// Whether the position at `ply` is drawn whatever is played next: the
+    /// fifty-move rule, mating material gone, or a repetition.
+    fn is_draw(&self, pos: &Chess, ply: usize) -> bool {
+        pos.halfmoves() >= 100
+            || pos.is_insufficient_material()
+            || repetition::repeats_an_earlier_position(
+                &self.game_keys,
+                &self.keys[..=ply],
+                &self.passed[..=ply],
+                pos.halfmoves() as usize,
+            )
     }
 
     fn play(&mut self, pos: &Chess, m: Move, ply: usize) -> Chess {
@@ -449,6 +478,19 @@ fn mated(ply: usize) -> i32 {
 
 fn is_mate(score: i32) -> bool {
     score.abs() >= MATE_BOUND
+}
+
+/// Whether `score`, from an iteration `depth` plies deep, is a mate no deeper
+/// iteration can shorten: the iteration looked at every line up to `depth`
+/// plies, so a mate within that distance is the shortest there is.
+///
+/// A mate further away than `depth` came from the transposition table, where
+/// an earlier search left it: a shorter one may be waiting a few iterations
+/// deeper. Stopping on it played a mate in 6 that walked back into a
+/// repetition, when a mate in 3 was on the board.
+fn is_shortest_mate(score: i32, depth: u32) -> bool {
+    let plies_to_mate = u32::try_from(MATE - score.abs()).unwrap_or(u32::MAX);
+    is_mate(score) && plies_to_mate <= depth
 }
 
 /// The remembered best move first, then captures by most valuable victim and

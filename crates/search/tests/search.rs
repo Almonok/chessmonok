@@ -3,8 +3,9 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use eval::MaterialEval;
-use search::{Limits, MATE, SearchResult, Searcher, TranspositionTable, time_budget};
+use search::{Limits, MATE, SearchResult, Searcher, TranspositionTable, position_key, time_budget};
 use shakmaty::fen::Fen;
+use shakmaty::uci::UciMove;
 use shakmaty::{CastlingMode, Chess, Color, Move, Position};
 
 fn pos(fen: &str) -> Chess {
@@ -170,6 +171,7 @@ fn on_depth_reports_every_iteration() {
     };
     Searcher::new(MaterialEval).search_with(
         &Chess::default(),
+        &[],
         &limits,
         &AtomicBool::new(false),
         |r| {
@@ -260,4 +262,83 @@ fn a_cleared_table_searches_like_a_fresh_one() {
     let after_clear = run_with_table(&table, KIWIPETE, 4);
     assert_eq!(fresh.nodes, after_clear.nodes);
     assert_eq!(fresh.best_move, after_clear.best_move);
+}
+
+/// The position after `moves` from `fen`, and the keys of the positions
+/// before it, oldest first: what the UCI layer hands the search.
+fn game_after(fen: &str, moves: &[&str]) -> (Chess, Vec<u64>) {
+    let mut position = pos(fen);
+    let mut earlier_keys = Vec::new();
+    for text in moves {
+        let m = text.parse::<UciMove>().unwrap().to_move(&position).unwrap();
+        earlier_keys.push(position_key(&position));
+        position.play_unchecked(m);
+    }
+    (position, earlier_keys)
+}
+
+fn run_game(position: &Chess, earlier_keys: &[u64], depth: u32) -> SearchResult {
+    let limits = Limits {
+        depth: Some(depth),
+        ..Limits::default()
+    };
+    Searcher::new(MaterialEval).search_with(
+        position,
+        earlier_keys,
+        &limits,
+        &AtomicBool::new(false),
+        |_| {},
+    )
+}
+
+/// White, a queen up, shuffled Kc1-b1-c1 while black went Kh8-g8. Black to
+/// move: Kg8-h8 brings back the game's first position.
+const SHUFFLE_FEN: &str = "7k/8/8/8/8/8/8/2KQ4 w - - 0 1";
+const SHUFFLE_MOVES: [&str; 3] = ["c1b1", "h8g8", "b1c1"];
+
+#[test]
+fn the_losing_side_takes_a_repetition() {
+    let (position, earlier_keys) = game_after(SHUFFLE_FEN, &SHUFFLE_MOVES);
+    let r = run_game(&position, &earlier_keys, 4);
+    assert_eq!(uci(r.best_move.unwrap()), "g8h8");
+    assert_eq!(r.score, 0);
+}
+
+#[test]
+fn without_the_game_the_same_move_is_no_draw() {
+    let (position, _) = game_after(SHUFFLE_FEN, &SHUFFLE_MOVES);
+    let r = run_game(&position, &[], 4);
+    assert!(r.score < -500, "score {}", r.score);
+}
+
+#[test]
+fn the_winning_side_avoids_a_repetition() {
+    // White, a queen and a knight up, went Nb1-d2-b1 while black went
+    // Kh8-g8-h8. Nb1-d2 is the move white picks among its equally winning
+    // ones, and here it repeats the game's second position: white must play
+    // something else and keep its winning score.
+    let (position, earlier_keys) = game_after(
+        "7k/8/8/8/8/8/8/1N1QK3 w - - 0 1",
+        &["b1d2", "h8g8", "d2b1", "g8h8"],
+    );
+    let r = run_game(&position, &earlier_keys, 4);
+    assert_ne!(uci(r.best_move.unwrap()), "b1d2");
+    assert!(r.score > 500, "score {}", r.score);
+    let without_the_game = run_game(&position, &[], 4);
+    assert_eq!(uci(without_the_game.best_move.unwrap()), "b1d2");
+}
+
+#[test]
+fn a_remembered_mate_does_not_end_the_search_before_it_is_proven_shortest() {
+    // The second search finds the first one's mate in the table at depth 1
+    // or 2. Stopping there trusts a mate the iteration could not have seen
+    // whole: in a lichess game, such a remembered mate in 6 was played over a
+    // mate in 3, walked back to an earlier position, and the game was drawn
+    // by repetition.
+    let table = Arc::new(TranspositionTable::new(16));
+    let mate_in_three = "k7/8/8/3K4/8/8/8/7R w - - 0 1";
+    run_with_table(&table, mate_in_three, 8);
+    let again = run_with_table(&table, mate_in_three, 8);
+    assert_eq!(again.score, MATE - 5);
+    assert!(again.depth >= 5, "stopped at depth {}", again.depth);
 }

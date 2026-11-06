@@ -86,6 +86,18 @@ fn reports_mate_scores() {
 }
 
 #[test]
+fn the_moves_played_reach_the_search_as_repetitions() {
+    // White, well ahead, went Nb1-d2-b1: playing Nb1-d2 again, its choice
+    // without the game, would repeat a position of the game.
+    let out = session(
+        "position fen 7k/8/8/8/8/8/8/1N1QK3 w - - 0 1 moves b1d2 h8g8 d2b1 g8h8\ngo depth 4\n",
+    );
+    assert_ne!(bestmove(&out), "b1d2", "{out}");
+    let without_the_game = session("position fen 7k/8/8/8/8/8/8/1N1QK3 w - - 4 3\ngo depth 4\n");
+    assert_eq!(bestmove(&without_the_game), "b1d2", "{without_the_game}");
+}
+
+#[test]
 fn mated_position_prints_null_move() {
     let out = session("position fen R5k1/5ppp/8/8/8/8/8/6K1 b - - 0 1\ngo depth 2\n");
     assert_eq!(bestmove(&out), "0000");

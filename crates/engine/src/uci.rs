@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use eval::{Evaluator, MaterialEval};
 use search::{
     DEFAULT_HASH_MEGABYTES, Limits, MATE, MAX_HASH_MEGABYTES, MAX_PLY, SearchResult, Searcher,
-    TranspositionTable,
+    TranspositionTable, position_key,
 };
 use shakmaty::fen::Fen;
 use shakmaty::uci::UciMove;
@@ -34,7 +34,7 @@ pub fn run<R: BufRead, W: Write + Send + 'static>(input: R, output: W) {
 
 struct Engine<W> {
     out: Out<W>,
-    pos: Chess,
+    game: Game,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
     random_mover: bool,
@@ -50,7 +50,7 @@ impl<W: Write + Send + 'static> Engine<W> {
     fn new(out: Out<W>) -> Self {
         Self {
             out,
-            pos: Chess::default(),
+            game: Game::default(),
             stop: Arc::new(AtomicBool::new(false)),
             worker: None,
             random_mover: false,
@@ -84,14 +84,14 @@ impl<W: Write + Send + 'static> Engine<W> {
             Some("isready") => send(&self.out, "readyok"),
             Some("ucinewgame") => {
                 self.stop_search();
-                self.pos = Chess::default();
+                self.game = Game::default();
                 self.table.clear();
             }
             Some("setoption") => self.set_option(line),
             Some("position") => {
                 self.stop_search();
                 match parse_position(&tokens.collect::<Vec<_>>()) {
-                    Ok(pos) => self.pos = pos,
+                    Ok(game) => self.game = game,
                     Err(e) => send(&self.out, &format!("info string {e}")),
                 }
             }
@@ -193,9 +193,9 @@ impl<W: Write + Send + 'static> Engine<W> {
             &format!("info string {}", self.evaluation.describe()),
         );
         self.stop = Arc::new(AtomicBool::new(false));
-        let (out, pos, stop, random, evaluation, table) = (
+        let (out, game, stop, random, evaluation, table) = (
             Arc::clone(&self.out),
-            self.pos.clone(),
+            self.game.clone(),
             Arc::clone(&self.stop),
             self.random_mover,
             self.evaluation.clone(),
@@ -203,14 +203,14 @@ impl<W: Write + Send + 'static> Engine<W> {
         );
         self.worker = Some(thread::spawn(move || {
             let best = if random {
-                random_move(&pos)
+                random_move(&game.position)
             } else {
                 match evaluation {
                     Evaluation::Material => {
-                        search(MaterialEval, &pos, &limits, &stop, &out, &table)
+                        search(MaterialEval, &game, &limits, &stop, &out, &table)
                     }
                     Evaluation::Nnue { evaluator, .. } => {
-                        search(evaluator, &pos, &limits, &stop, &out, &table)
+                        search(evaluator, &game, &limits, &stop, &out, &table)
                     }
                     Evaluation::Broken { .. } => None,
                 }
@@ -235,12 +235,12 @@ impl<W: Write + Send + 'static> Engine<W> {
     }
 }
 
-/// Search `position` with `evaluator` and the session's `table`, reporting
-/// each finished depth. Generic, so each evaluator gets its own compiled copy
-/// of the search.
+/// Search the game's position with `evaluator` and the session's `table`,
+/// reporting each finished depth. Generic, so each evaluator gets its own
+/// compiled copy of the search.
 fn search<E: Evaluator, W: Write>(
     evaluator: E,
-    position: &Chess,
+    game: &Game,
     limits: &Limits,
     stop: &AtomicBool,
     out: &Out<W>,
@@ -249,7 +249,7 @@ fn search<E: Evaluator, W: Write>(
     let start = Instant::now();
     let mut searcher = Searcher::with_table(evaluator, Arc::clone(table));
     searcher
-        .search_with(position, limits, stop, |result| {
+        .search_with(&game.position, &game.earlier_keys, limits, stop, |result| {
             send(out, &info_line(result, start.elapsed(), table.hashfull()));
         })
         .best_move
@@ -276,7 +276,19 @@ fn send<W: Write>(out: &Out<W>, line: &str) {
     let _ = out.flush();
 }
 
-fn parse_position(tokens: &[&str]) -> Result<Chess, String> {
+/// The position to search and the positions the game went through to reach
+/// it, which the search must know to see repetitions.
+#[derive(Clone, Debug, Default)]
+struct Game {
+    position: Chess,
+    /// The keys of the positions before `position`, oldest first, back to
+    /// the last capture or pawn move: positions before such a move can never
+    /// occur again.
+    earlier_keys: Vec<u64>,
+}
+
+/// `position (startpos | fen <fen>) [moves <move>...]`, replaying the moves.
+fn parse_position(tokens: &[&str]) -> Result<Game, String> {
     let split = tokens
         .iter()
         .position(|t| *t == "moves")
@@ -291,15 +303,23 @@ fn parse_position(tokens: &[&str]) -> Result<Chess, String> {
             .map_err(|e| e.to_string())?,
         _ => return Err("expected startpos or fen".to_string()),
     };
+    let mut earlier_keys = Vec::new();
     for text in tokens.get(split + 1..).unwrap_or(&[]) {
         let m = text
             .parse::<UciMove>()
             .map_err(|e| e.to_string())?
             .to_move(&pos)
             .map_err(|e| format!("{text}: {e}"))?;
+        earlier_keys.push(position_key(&pos));
         pos.play_unchecked(m);
+        if pos.halfmoves() == 0 {
+            earlier_keys.clear();
+        }
     }
-    Ok(pos)
+    Ok(Game {
+        position: pos,
+        earlier_keys,
+    })
 }
 
 fn parse_go(tokens: &[&str]) -> Limits {
