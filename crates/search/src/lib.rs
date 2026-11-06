@@ -5,7 +5,10 @@
 //! the leaves. A transposition table (`transposition`), shared across
 //! searches, remembers each node's result: it orders the remembered best move
 //! first and ends the search of a node that was already searched deep enough.
+//! Null-move pruning (`null_move`) cuts nodes where even passing the turn
+//! keeps the side to move at beta.
 
+mod null_move;
 mod position_key;
 mod transposition;
 
@@ -74,6 +77,9 @@ pub struct Searcher<E: Evaluator> {
     /// The Zobrist key of the position at each ply of the current line, kept
     /// up to date move by move like `states`.
     keys: Vec<u64>,
+    /// Whether the move into each ply of the current line was a pass: a pass
+    /// is never answered by another pass.
+    passed: Vec<bool>,
     pv: Vec<Vec<Move>>,
     /// Shared, not owned: the engine keeps one table across `go` commands so
     /// each search starts from what the previous ones learnt.
@@ -108,6 +114,7 @@ impl<E: Evaluator> Searcher<E> {
             eval,
             states: Vec::new(),
             keys: Vec::new(),
+            passed: Vec::new(),
             pv: Vec::new(),
             table,
             nodes: 0,
@@ -133,6 +140,7 @@ impl<E: Evaluator> Searcher<E> {
         self.states = vec![self.eval.refresh(pos); MAX_PLY + 1];
         self.keys = vec![0; MAX_PLY + 1];
         self.keys[0] = position_key(pos);
+        self.passed = vec![false; MAX_PLY + 1];
         self.pv = vec![Vec::new(); MAX_PLY + 1];
         self.table.new_search();
         let mut best = SearchResult {
@@ -201,6 +209,13 @@ impl<E: Evaluator> Searcher<E> {
             {
                 return score;
             }
+        }
+        if let Some(score) = self.null_move_cutoff(pos, depth, ply, beta, stop) {
+            return score;
+        }
+        // The pass search may have run out of time: nothing it saw is a result.
+        if self.aborted {
+            return 0;
         }
         let mut moves = pos.legal_moves();
         if moves.is_empty() {
@@ -304,7 +319,77 @@ impl<E: Evaluator> Searcher<E> {
         child.play_unchecked(m);
         self.states[ply + 1] = self.eval.update(&self.states[ply], &child, &dirty);
         self.keys[ply + 1] = key_after(pos, self.keys[ply], m, &child);
+        self.passed[ply + 1] = false;
         child
+    }
+
+    /// The score that ends this node through a pass, if one is allowed and
+    /// the passed position, searched shallower, still reaches `beta`.
+    ///
+    /// The cutoff is remembered as a lower bound. Without it, the next search
+    /// of this node (next iteration, next `go`) must redo the pass search: a
+    /// warm table then saved less than half the work on Kiwipete instead of
+    /// three quarters.
+    fn null_move_cutoff(
+        &mut self,
+        pos: &Chess,
+        depth: u32,
+        ply: usize,
+        beta: i32,
+        stop: &AtomicBool,
+    ) -> Option<i32> {
+        if !self.may_pass(pos, depth, ply, beta) {
+            return None;
+        }
+        let passed_position = self.play_pass(pos, ply)?;
+        let reduced_depth = null_move::reduced_depth(depth);
+        let score = -self.negamax(
+            &passed_position,
+            reduced_depth,
+            ply + 1,
+            -beta,
+            -beta + 1,
+            stop,
+        );
+        if self.aborted || score < beta {
+            return None;
+        }
+        // The real moves were never searched, so a mate seen through the pass
+        // is not proven: report only that the node reaches beta.
+        let score = if is_mate(score) { beta } else { score };
+        self.table.store(
+            self.keys[ply],
+            TableEntry {
+                best_move: None,
+                score: score_to_table(score, ply),
+                depth,
+                bound: Bound::Lower,
+            },
+        );
+        Some(score)
+    }
+
+    /// The guards of null-move pruning, cheapest first; the static evaluation
+    /// comes last because it is the only costly one.
+    fn may_pass(&self, pos: &Chess, depth: u32, ply: usize, beta: i32) -> bool {
+        ply > 0
+            && depth >= null_move::MINIMUM_DEPTH
+            && !self.passed[ply]
+            && !is_mate(beta)
+            && !pos.is_check()
+            && null_move::has_pieces_besides_pawns(pos)
+            && self.eval.evaluate(&self.states[ply], pos) >= beta
+    }
+
+    /// Like `play`, for a pass. No piece moves, so the evaluation state is
+    /// carried over unchanged; the key is recomputed because the en-passant
+    /// right may vanish.
+    fn play_pass(&mut self, pos: &Chess, ply: usize) -> Option<Chess> {
+        let child = null_move::pass(pos)?;
+        self.states[ply + 1] = self.states[ply].clone();
+        self.keys[ply + 1] = position_key(&child);
+        self.passed[ply + 1] = true;
+        Some(child)
     }
 
     fn set_pv(&mut self, ply: usize, m: Move) {

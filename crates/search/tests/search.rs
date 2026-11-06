@@ -56,6 +56,42 @@ fn finds_mate_in_two() {
 }
 
 #[test]
+fn finds_mate_in_three_with_a_rook() {
+    // The attacking side has a rook, so passes are tried all along the line:
+    // they must not hide the mate.
+    let r = run("k7/8/8/3K4/8/8/8/7R w - - 0 1", 6);
+    assert_eq!(r.score, MATE - 5);
+}
+
+#[test]
+fn finds_mate_in_three_in_a_middlegame() {
+    let r = run(
+        "r1b1kb1r/pppp1ppp/5q2/4n3/3KP3/2N3PN/PPP4P/R1BQ1B1R b kq - 0 1",
+        6,
+    );
+    assert_eq!(r.score, MATE - 5);
+    assert_eq!(uci(r.best_move.unwrap()), "f8c5");
+}
+
+#[test]
+fn never_passes_with_only_pawns_left() {
+    // Neither side has a piece, so null-move pruning must not change this
+    // search at all: the count is the one measured before it existed.
+    let r = run("8/pp3k2/2p5/8/8/2P5/PP3K2/8 w - - 0 1", 9);
+    assert_eq!(r.nodes, 45_382);
+}
+
+#[test]
+fn null_move_pruning_halves_a_middlegame_search_at_least() {
+    // 3_564_643 nodes at depth 6 before null-move pruning.
+    let r = run(
+        "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10",
+        6,
+    );
+    assert!(r.nodes < 3_564_643 / 2, "{} nodes", r.nodes);
+}
+
+#[test]
 fn takes_a_hanging_queen() {
     let r = run("4k3/8/8/3q4/8/8/8/3RK3 w - - 0 1", 3);
     assert_eq!(uci(r.best_move.unwrap()), "d1d5");
