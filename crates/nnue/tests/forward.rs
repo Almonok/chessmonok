@@ -25,7 +25,7 @@ fn activation_clamps_and_puts_the_side_to_move_first() {
     accumulator.black[0] = 7;
     let input = activate(&accumulator, Color::Black);
     assert_eq!(input[0], 7, "black (to move) comes first");
-    assert_eq!(&input[L1..L1 + 3], &[0, QA as u8, 50]);
+    assert_eq!(&input[L1..L1 + 3], &[0, QA as i8, 50]);
 }
 
 #[test]

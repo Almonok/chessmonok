@@ -4,11 +4,23 @@
 //! forward pass, to the exact value.
 //!
 //! ```text
-//! x0 = clamp([accumulator of the side to move | accumulator of the other side], 0, QA)   u8 x 512
-//! x1 = clamp((l1_weight @ x0 + l1_bias) >> 6, 0, QA)  u8 x 32
-//! x2 = clamp((l2_weight @ x1 + l2_bias) >> 6, 0, QA)  u8 x 32
+//! x0 = clamp([accumulator of the side to move | accumulator of the other side], 0, QA)   i8 x 512
+//! x1 = clamp((l1_weight @ x0 + l1_bias) >> 6, 0, QA)  i8 x 32
+//! x2 = clamp((l2_weight @ x1 + l2_bias) >> 6, 0, QA)  i8 x 32
 //! cp = (out_weight @ x2 + out_bias) * OUT_SCALE / (QA * QB), toward zero
 //! ```
+//!
+//! # Why the activations are `i8`
+//!
+//! An activation is never negative, yet it is stored as a signed byte. The
+//! reason is the instruction the compiler can pick for `weights · input`.
+//! ARM's `sdot` multiplies 16 pairs of bytes and adds them into four 32-bit
+//! sums in one instruction, but only when *both* operands are signed. With
+//! `u8` activations against `i8` weights, the compiler has no such
+//! instruction: it widens every byte to 16 bits first, then multiplies 4
+//! pairs per instruction (`smlal`), about eight times the work for the
+//! first hidden layer. Clamping to `[0, QA]` with `QA = 127` keeps every
+//! activation inside `i8`, so the change of type changes no value.
 
 use shakmaty::Color;
 
@@ -20,7 +32,7 @@ const WEIGHT_SHIFT: u32 = 6;
 const _: () = assert!(1 << WEIGHT_SHIFT == QB);
 
 /// Clamp both halves to `[0, QA]` and concatenate them, side to move first.
-pub fn activate(accumulator: &Accumulator, side_to_move: Color) -> [u8; 2 * L1] {
+pub fn activate(accumulator: &Accumulator, side_to_move: Color) -> [i8; 2 * L1] {
     let first = accumulator.half(side_to_move);
     let second = accumulator.half(side_to_move.other());
     std::array::from_fn(|i| {
@@ -30,19 +42,19 @@ pub fn activate(accumulator: &Accumulator, side_to_move: Color) -> [u8; 2 * L1] 
 }
 
 /// The first hidden layer: `clamp((l1_weight @ input + l1_bias) >> 6, 0, QA)`.
-pub fn hidden1(net: &Network, input: &[u8; 2 * L1]) -> [u8; L2] {
+pub fn hidden1(net: &Network, input: &[i8; 2 * L1]) -> [i8; L2] {
     dense_layer(&net.l1_weight, &net.l1_bias, input)
 }
 
 /// The second hidden layer: the same computation over `L2` inputs.
-pub fn hidden2(net: &Network, input: &[u8; L2]) -> [u8; L3] {
+pub fn hidden2(net: &Network, input: &[i8; L2]) -> [i8; L3] {
     dense_layer(&net.l2_weight, &net.l2_bias, input)
 }
 
 /// Centipawns from the side to move:
 /// `(out_weight @ input + out_bias) * OUT_SCALE / (QA * QB)`, truncated
 /// toward zero.
-pub fn output(net: &Network, input: &[u8; L3]) -> i32 {
+pub fn output(net: &Network, input: &[i8; L3]) -> i32 {
     let sum = net.out_bias
         + input
             .iter()
@@ -63,8 +75,8 @@ pub fn output(net: &Network, input: &[u8; L3]) -> i32 {
 fn dense_layer<const INPUTS: usize, const OUTPUTS: usize>(
     weights: &[i8],
     biases: &[i32; OUTPUTS],
-    input: &[u8; INPUTS],
-) -> [u8; OUTPUTS] {
+    input: &[i8; INPUTS],
+) -> [i8; OUTPUTS] {
     std::array::from_fn(|output_index| {
         let row = &weights[output_index * INPUTS..(output_index + 1) * INPUTS];
         let sum = biases[output_index]
@@ -78,8 +90,8 @@ fn dense_layer<const INPUTS: usize, const OUTPUTS: usize>(
 }
 
 /// The clipped `ReLU` activation: negative becomes 0, above `QA` becomes `QA`.
-fn clipped(value: i32) -> u8 {
-    u8::try_from(value.clamp(0, QA)).expect("clamped into 0..=127")
+fn clipped(value: i32) -> i8 {
+    i8::try_from(value.clamp(0, QA)).expect("clamped into 0..=127")
 }
 
 /// The whole pass, from an accumulator to centipawns for `side_to_move`.

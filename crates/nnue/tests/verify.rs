@@ -33,8 +33,8 @@ struct Detailed {
     not_side_to_move_features: Vec<usize>,
     acc_white: Vec<i16>,
     acc_black: Vec<i16>,
-    l1_out: Vec<u8>,
-    l2_out: Vec<u8>,
+    l1_out: Vec<i8>,
+    l2_out: Vec<i8>,
     eval: i32,
 }
 
