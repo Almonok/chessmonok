@@ -40,8 +40,23 @@ jobs:
       - name: Lints
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Tests
-        run: cargo test --workspace
+      # cargo-llvm-cov runs the same `cargo test --workspace`, built with
+      # coverage instrumentation, so the coverage report costs no second build
+      # of the workspace. llvm-tools is installed here, not in
+      # rust-toolchain.toml, so local toolchains stay lean.
+      - name: Install coverage tools
+        run: rustup component add llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Tests (with coverage)
+        run: cargo llvm-cov --workspace --codecov --output-path codecov.json
+
+      # A Codecov outage must not block a merge, so a failed upload only warns.
+      - uses: codecov/codecov-action@v5
+        with:
+          files: codecov.json
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
 
       # Catches broken intra-doc links, which nothing else does.
       - name: Docs
