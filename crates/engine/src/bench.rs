@@ -6,12 +6,16 @@
 //! engine faster (SIMD, a better data layout) must leave the node total
 //! exactly unchanged. If it moves, the change also changed what the engine
 //! searches, and needs an Elo test, not just a stopwatch.
+//!
+//! A third number, the **first-move cutoff rate** (see
+//! `search::SearchStatistics`), measures move ordering: a change meant to
+//! order moves better must raise it.
 
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use eval::{Evaluator, MaterialEval};
-use search::{Limits, Searcher};
+use search::{Limits, SearchStatistics, Searcher};
 use shakmaty::fen::Fen;
 use shakmaty::{CastlingMode, Chess};
 
@@ -42,6 +46,7 @@ const POSITIONS: [&str; 8] = [
 #[derive(Debug)]
 pub struct BenchResult {
     pub nodes: u64,
+    pub statistics: SearchStatistics,
     pub elapsed: Duration,
 }
 
@@ -61,13 +66,14 @@ pub fn run_bench(evaluation: &Evaluation, depth: u32) -> Option<BenchResult> {
 /// The same as [`run_bench`], on the given positions (FENs).
 fn run_bench_on(evaluation: &Evaluation, depth: u32, positions: &[&str]) -> Option<BenchResult> {
     let started = Instant::now();
-    let nodes = match evaluation {
-        Evaluation::Material => total_nodes(&MaterialEval, depth, positions),
-        Evaluation::Nnue { evaluator, .. } => total_nodes(evaluator, depth, positions),
+    let (nodes, statistics) = match evaluation {
+        Evaluation::Material => search_all(&MaterialEval, depth, positions),
+        Evaluation::Nnue { evaluator, .. } => search_all(evaluator, depth, positions),
         Evaluation::Broken { .. } => return None,
     };
     Some(BenchResult {
         nodes,
+        statistics,
         elapsed: started.elapsed(),
     })
 }
@@ -75,7 +81,11 @@ fn run_bench_on(evaluation: &Evaluation, depth: u32, positions: &[&str]) -> Opti
 /// Each position is searched by a fresh `Searcher` with its own empty
 /// transposition table, so no position's search depends on the one before
 /// it, and the node total does not depend on the order of the positions.
-fn total_nodes<E: Evaluator + Clone>(evaluator: &E, depth: u32, positions: &[&str]) -> u64 {
+fn search_all<E: Evaluator + Clone>(
+    evaluator: &E,
+    depth: u32,
+    positions: &[&str],
+) -> (u64, SearchStatistics) {
     let limits = Limits {
         depth: Some(depth),
         ..Limits::default()
@@ -84,11 +94,12 @@ fn total_nodes<E: Evaluator + Clone>(evaluator: &E, depth: u32, positions: &[&st
     positions
         .iter()
         .map(|fen| {
-            Searcher::new(evaluator.clone())
-                .search(&bench_position(fen), &limits, &never_stop)
-                .nodes
+            Searcher::new(evaluator.clone()).search(&bench_position(fen), &limits, &never_stop)
         })
-        .sum()
+        .fold(
+            (0, SearchStatistics::default()),
+            |(nodes, statistics), result| (nodes + result.nodes, statistics + result.statistics),
+        )
 }
 
 fn bench_position(fen: &str) -> Chess {

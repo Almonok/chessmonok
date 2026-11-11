@@ -280,3 +280,13 @@ fn bench_reports_nodes_and_is_deterministic() {
     assert!(first > 0);
     assert_eq!(first, second, "the node count is a signature of the search");
 }
+
+#[test]
+fn bench_reports_first_move_cutoffs() {
+    let out = session("bench 3\n");
+    let line = out
+        .lines()
+        .find(|line| line.starts_with("info string bench cutoffs "))
+        .unwrap_or_else(|| panic!("no cutoff line in {out}"));
+    assert!(line.contains(" first-move "), "{line}");
+}

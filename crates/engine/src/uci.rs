@@ -179,6 +179,15 @@ impl<W: Write + Send + 'static> Engine<W> {
                 result.elapsed.as_millis()
             ),
         );
+        send(
+            &self.out,
+            &format!(
+                "info string bench cutoffs {} first-move {} ({:.1}%)",
+                result.statistics.cutoffs,
+                result.statistics.first_move_cutoffs,
+                result.statistics.first_move_cutoff_rate() * 100.0
+            ),
+        );
     }
 
     fn go(&mut self, limits: Limits) {

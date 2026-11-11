@@ -8,10 +8,20 @@
 //! Null-move pruning (`null_move`) cuts nodes where even passing the turn
 //! keeps the side to move at beta. A position that repeats an earlier one, in
 //! the game or in the searched line, scores as a draw (`repetition`).
+//!
+//! Moves are searched best guess first (`ordering`): the remembered move,
+//! then captures, then quiet moves that refuted a sibling position at the
+//! same ply (`killers`), then the other quiet moves by how often they caused
+//! cutoffs so far (`history`). `statistics` counts how often the first move
+//! tried was the one that cut, the quick measure of that order.
 
+mod history;
+mod killers;
 mod null_move;
+mod ordering;
 mod position_key;
 mod repetition;
+mod statistics;
 mod transposition;
 
 use std::fmt;
@@ -20,9 +30,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use eval::{Evaluator, dirty_pieces};
+use history::History;
+use killers::Killers;
 use shakmaty::{Chess, Color, Move, MoveList, Position};
 
 pub use position_key::{key_after, position_key};
+pub use statistics::SearchStatistics;
 pub use transposition::{
     Bound, DEFAULT_HASH_MEGABYTES, MAX_HASH_MEGABYTES, PackedMove, TableEntry, TranspositionTable,
     score_from_table, score_to_table,
@@ -58,6 +71,7 @@ pub struct SearchResult {
     pub depth: u32,
     pub nodes: u64,
     pub pv: Vec<Move>,
+    pub statistics: SearchStatistics,
 }
 
 /// `movetime`, else a thirtieth of the clock plus half the increment, capped at a quarter.
@@ -86,18 +100,26 @@ pub struct Searcher<E: Evaluator> {
     /// is never answered by another pass.
     passed: Vec<bool>,
     pv: Vec<Vec<Move>>,
+    /// Quiet moves that caused cutoffs, per ply; emptied by every search so
+    /// that a search depends only on its position and limits.
+    killers: Killers,
+    /// How often each quiet move caused a cutoff, per side; emptied by every
+    /// search, like `killers`.
+    history: History,
     /// Shared, not owned: the engine keeps one table across `go` commands so
     /// each search starts from what the previous ones learnt.
     table: Arc<TranspositionTable>,
     nodes: u64,
+    statistics: SearchStatistics,
     deadline: Option<Instant>,
     can_abort: bool,
     aborted: bool,
 }
 
 impl<E: Evaluator> fmt::Debug for Searcher<E> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Searcher")
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Searcher")
             .field("nodes", &self.nodes)
             .field("table", &self.table)
             .finish_non_exhaustive()
@@ -122,8 +144,11 @@ impl<E: Evaluator> Searcher<E> {
             game_keys: Vec::new(),
             passed: Vec::new(),
             pv: Vec::new(),
+            killers: Killers::new(),
+            history: History::new(),
             table,
             nodes: 0,
+            statistics: SearchStatistics::default(),
             deadline: None,
             can_abort: false,
             aborted: false,
@@ -149,12 +174,15 @@ impl<E: Evaluator> Searcher<E> {
     ) -> SearchResult {
         self.deadline = time_budget(limits, pos.turn()).map(|budget| Instant::now() + budget);
         self.nodes = 0;
+        self.statistics = SearchStatistics::default();
         self.states = vec![self.eval.refresh(pos); MAX_PLY + 1];
         self.keys = vec![0; MAX_PLY + 1];
         self.keys[0] = position_key(pos);
         self.game_keys = game_keys.to_vec();
         self.passed = vec![false; MAX_PLY + 1];
         self.pv = vec![Vec::new(); MAX_PLY + 1];
+        self.killers = Killers::new();
+        self.history = History::new();
         self.table.new_search();
         let mut best = SearchResult {
             best_move: None,
@@ -162,6 +190,7 @@ impl<E: Evaluator> Searcher<E> {
             depth: 0,
             nodes: 0,
             pv: Vec::new(),
+            statistics: SearchStatistics::default(),
         };
         if pos.legal_moves().is_empty() {
             best.score = if pos.is_check() { -MATE } else { 0 };
@@ -180,6 +209,7 @@ impl<E: Evaluator> Searcher<E> {
                 depth,
                 nodes: self.nodes,
                 pv: self.pv[0].clone(),
+                statistics: self.statistics,
             };
             on_depth(&best);
             let out_of_time = self.deadline.is_some_and(|d| Instant::now() >= d);
@@ -188,6 +218,7 @@ impl<E: Evaluator> Searcher<E> {
             }
         }
         best.nodes = self.nodes;
+        best.statistics = self.statistics;
         best
     }
 
@@ -237,12 +268,19 @@ impl<E: Evaluator> Searcher<E> {
         if moves.is_empty() {
             return if pos.is_check() { mated(ply) } else { 0 };
         }
-        order(&mut moves, remembered.and_then(|entry| entry.best_move));
+        ordering::order_moves(
+            &mut moves,
+            remembered.and_then(|entry| entry.best_move),
+            self.killers.at(ply),
+            &self.history,
+            pos.turn(),
+        );
         let alpha_on_entry = alpha;
         let mut best = -INF;
         let mut best_move = None;
-        for &m in &moves {
-            let child = self.play(pos, m, ply);
+        let mut quiet_moves_tried = MoveList::new();
+        for (move_index, &chess_move) in moves.iter().enumerate() {
+            let child = self.play(pos, chess_move, ply);
             let score = -self.negamax(&child, depth - 1, ply + 1, -beta, -alpha, stop);
             if self.aborted {
                 // The scores of an unfinished subtree are not results: nothing
@@ -253,12 +291,25 @@ impl<E: Evaluator> Searcher<E> {
                 best = score;
                 if score > alpha {
                     alpha = score;
-                    best_move = Some(m);
-                    self.set_pv(ply, m);
+                    best_move = Some(chess_move);
+                    self.set_pv(ply, chess_move);
                 }
             }
             if alpha >= beta {
+                self.statistics.record_cutoff(move_index == 0);
+                if ordering::is_quiet(chess_move) {
+                    self.learn_from_quiet_cutoff(
+                        pos.turn(),
+                        chess_move,
+                        &quiet_moves_tried,
+                        depth,
+                        ply,
+                    );
+                }
                 break;
+            }
+            if ordering::is_quiet(chess_move) {
+                quiet_moves_tried.push(chess_move);
             }
         }
         self.table.store(
@@ -308,9 +359,9 @@ impl<E: Evaluator> Searcher<E> {
             alpha = alpha.max(stand);
             best = stand;
         }
-        order(&mut moves, None);
-        for &m in &moves {
-            let child = self.play(pos, m, ply);
+        ordering::order_captures(&mut moves);
+        for &chess_move in &moves {
+            let child = self.play(pos, chess_move, ply);
             let score = -self.quiesce(&child, ply + 1, -beta, -alpha, stop);
             if self.aborted {
                 return 0;
@@ -319,7 +370,7 @@ impl<E: Evaluator> Searcher<E> {
                 best = score;
                 if score > alpha {
                     alpha = score;
-                    self.set_pv(ply, m);
+                    self.set_pv(ply, chess_move);
                 }
             }
             if alpha >= beta {
@@ -342,12 +393,12 @@ impl<E: Evaluator> Searcher<E> {
             )
     }
 
-    fn play(&mut self, pos: &Chess, m: Move, ply: usize) -> Chess {
-        let dirty = dirty_pieces(pos, m);
+    fn play(&mut self, pos: &Chess, chess_move: Move, ply: usize) -> Chess {
+        let dirty = dirty_pieces(pos, chess_move);
         let mut child = pos.clone();
-        child.play_unchecked(m);
+        child.play_unchecked(chess_move);
         self.states[ply + 1] = self.eval.update(&self.states[ply], &child, &dirty);
-        self.keys[ply + 1] = key_after(pos, self.keys[ply], m, &child);
+        self.keys[ply + 1] = key_after(pos, self.keys[ply], chess_move, &child);
         self.passed[ply + 1] = false;
         child
     }
@@ -421,8 +472,26 @@ impl<E: Evaluator> Searcher<E> {
         Some(child)
     }
 
-    fn set_pv(&mut self, ply: usize, m: Move) {
-        let mut line = vec![m];
+    /// The quiet move `cutting` reached beta: it becomes a killer at this
+    /// ply and gains history, and the quiet moves tried before it, which did
+    /// not cut, lose history.
+    fn learn_from_quiet_cutoff(
+        &mut self,
+        side_to_move: Color,
+        cutting: Move,
+        quiet_moves_tried: &MoveList,
+        remaining_depth: u32,
+        ply: usize,
+    ) {
+        self.killers.record(ply, cutting);
+        self.history.reward(side_to_move, cutting, remaining_depth);
+        for &failed in quiet_moves_tried {
+            self.history.penalise(side_to_move, failed, remaining_depth);
+        }
+    }
+
+    fn set_pv(&mut self, ply: usize, chess_move: Move) {
+        let mut line = vec![chess_move];
         line.extend_from_slice(&self.pv[ply + 1]);
         self.pv[ply] = line;
     }
@@ -491,24 +560,4 @@ fn is_mate(score: i32) -> bool {
 fn is_shortest_mate(score: i32, depth: u32) -> bool {
     let plies_to_mate = u32::try_from(MATE - score.abs()).unwrap_or(u32::MAX);
     is_mate(score) && plies_to_mate <= depth
-}
-
-/// The remembered best move first, then captures by most valuable victim and
-/// least valuable attacker (MVV-LVA), promotions among them.
-fn order(moves: &mut MoveList, remembered: Option<PackedMove>) {
-    moves.sort_by_key(|m| {
-        let victim = m.capture().map_or(0, |r| r as i32 * 10);
-        let promotion = m.promotion().map_or(0, |r| r as i32 * 10);
-        -(victim + promotion - m.role() as i32)
-    });
-    // The packed move is only a hint (it could come from another position
-    // that shares the key): it is used only if it is one of the legal moves.
-    let remembered_index = remembered.and_then(|remembered| {
-        moves
-            .iter()
-            .position(|&candidate| PackedMove::new(candidate) == remembered)
-    });
-    if let Some(index) = remembered_index {
-        moves[..=index].rotate_right(1);
-    }
 }

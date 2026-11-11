@@ -495,7 +495,10 @@ mod tests {
                 .into_position(CastlingMode::Standard)
                 .unwrap();
             let moves = position.legal_moves();
-            let mut packed: Vec<u16> = moves.iter().map(|&m| PackedMove::new(m).bits()).collect();
+            let mut packed: Vec<u16> = moves
+                .iter()
+                .map(|&chess_move| PackedMove::new(chess_move).bits())
+                .collect();
             packed.sort_unstable();
             packed.dedup();
             assert_eq!(packed.len(), moves.len(), "{fen}");
