@@ -188,6 +188,24 @@ impl<W: Write + Send + 'static> Engine<W> {
                 result.statistics.first_move_cutoff_rate() * 100.0
             ),
         );
+        send(
+            &self.out,
+            &format!(
+                "info string bench zero-window {} re-searched {} ({:.1}%)",
+                result.statistics.zero_window_searches,
+                result.statistics.zero_window_re_searches,
+                result.statistics.zero_window_re_search_rate() * 100.0
+            ),
+        );
+        send(
+            &self.out,
+            &format!(
+                "info string bench reduced {} re-searched {} ({:.1}%)",
+                result.statistics.reduced_searches,
+                result.statistics.reduced_re_searches,
+                result.statistics.reduced_re_search_rate() * 100.0
+            ),
+        );
     }
 
     fn go(&mut self, limits: Limits) {

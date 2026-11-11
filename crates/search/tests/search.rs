@@ -52,9 +52,12 @@ fn finds_mate_in_one() {
     assert_eq!(result.score, MATE - 1);
 }
 
+/// Depth 5, one ply more than the mate needs: the mating king move is quiet
+/// and tried late, so late-move reductions search it at depth 1 first, too
+/// shallow to see the rook mate behind it (found from depth 5 on).
 #[test]
 fn finds_mate_in_two() {
-    let result = run("k7/8/2K5/8/8/8/8/7R w - - 0 1", 4);
+    let result = run("k7/8/2K5/8/8/8/8/7R w - - 0 1", 5);
     assert_eq!(result.score, MATE - 3);
     assert!(["c6b6", "c6c7"].contains(&uci(result.best_move.unwrap()).as_str()));
 }
@@ -62,8 +65,10 @@ fn finds_mate_in_two() {
 #[test]
 fn finds_mate_in_three_with_a_rook() {
     // The attacking side has a rook, so passes are tried all along the line:
-    // they must not hide the mate.
-    let result = run("k7/8/8/3K4/8/8/8/7R w - - 0 1", 6);
+    // they must not hide the mate. Depth 8, not 6: every move of the mating
+    // plan is a quiet king or rook move, the kind late-move reductions search
+    // shallower, so the mate is found two plies later (from depth 8 on).
+    let result = run("k7/8/8/3K4/8/8/8/7R w - - 0 1", 8);
     assert_eq!(result.score, MATE - 5);
 }
 
@@ -83,7 +88,7 @@ fn never_passes_with_only_pawns_left() {
     // search at all: the count is the one measured with `may_pass` switched
     // off. Re-measure it that way whenever the move order changes.
     let result = run("8/pp3k2/2p5/8/8/2P5/PP3K2/8 w - - 0 1", 9);
-    assert_eq!(result.nodes, 49_816);
+    assert_eq!(result.nodes, 8_445);
 }
 
 #[test]
@@ -252,10 +257,11 @@ fn a_mate_remembered_at_another_ply_keeps_its_true_distance() {
     // two plies below its root. The second search starts one ply later
     // (after 1.Kb6), so it meets that position one ply below its root: the
     // mate must now read as 2 plies away for black, not 3.
+    // Depth 5: the first search must find the mate, see `finds_mate_in_two`.
     let table = Arc::new(TranspositionTable::new(1));
-    let first = run_with_table(&table, "k7/8/2K5/8/8/8/8/7R w - - 0 1", 4);
+    let first = run_with_table(&table, "k7/8/2K5/8/8/8/8/7R w - - 0 1", 5);
     assert_eq!(first.score, MATE - 3);
-    let later = run_with_table(&table, "k7/8/1K6/8/8/8/8/7R b - - 1 1", 4);
+    let later = run_with_table(&table, "k7/8/1K6/8/8/8/8/7R b - - 1 1", 5);
     assert_eq!(later.score, -(MATE - 2));
 }
 
@@ -399,4 +405,52 @@ fn cutoff_statistics_are_counted() {
 #[test]
 fn no_cutoffs_means_a_zero_rate() {
     assert!(SearchStatistics::default().first_move_cutoff_rate() == 0.0);
+}
+
+#[test]
+fn zero_window_searches_are_counted() {
+    let statistics = run(QUIET_MIDDLEGAME, 5).statistics;
+    assert!(statistics.zero_window_searches > 0);
+    assert!(statistics.zero_window_re_searches <= statistics.zero_window_searches);
+}
+
+/// A smoke test: with zero-window searches and their re-searches, the
+/// reported line must still be a sequence of legal moves. It does not force
+/// a re-search that fails low at a PV node; `search_after_move` keeps the
+/// first move's line then because only a score above alpha updates the PV.
+#[test]
+fn the_principal_variation_is_a_legal_line() {
+    let result = run(KIWIPETE, 5);
+    assert!(!result.pv.is_empty());
+    let mut position = pos(KIWIPETE);
+    for &chess_move in &result.pv {
+        assert!(
+            position.legal_moves().contains(&chess_move),
+            "{}",
+            uci(chess_move)
+        );
+        position.play_unchecked(chess_move);
+    }
+}
+
+#[test]
+fn late_moves_are_reduced_and_some_re_searched() {
+    let statistics = run(QUIET_MIDDLEGAME, 6).statistics;
+    assert!(statistics.reduced_searches > 0);
+    assert!(statistics.reduced_re_searches <= statistics.reduced_searches);
+}
+
+/// A smoke test: a search cut short by time, with reduced searches and
+/// re-searches in flight, still returns a legal move. It cannot choose where
+/// the stop lands; `search_after_move` returns 0 after every child search
+/// that was aborted, and `search_with` drops the unfinished iteration.
+#[test]
+fn a_stopped_search_still_returns_a_legal_move() {
+    let limits = Limits {
+        movetime: Some(Duration::from_millis(20)),
+        ..Limits::default()
+    };
+    let position = pos(QUIET_MIDDLEGAME);
+    let result = Searcher::new(MaterialEval).search(&position, &limits, &AtomicBool::new(false));
+    assert!(position.legal_moves().contains(&result.best_move.unwrap()));
 }

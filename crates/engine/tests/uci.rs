@@ -290,3 +290,23 @@ fn bench_reports_first_move_cutoffs() {
         .unwrap_or_else(|| panic!("no cutoff line in {out}"));
     assert!(line.contains(" first-move "), "{line}");
 }
+
+#[test]
+fn bench_reports_zero_window_re_searches() {
+    let out = session("bench 3\n");
+    let line = out
+        .lines()
+        .find(|line| line.starts_with("info string bench zero-window "))
+        .unwrap_or_else(|| panic!("no zero-window line in {out}"));
+    assert!(line.contains(" re-searched "), "{line}");
+}
+
+#[test]
+fn bench_reports_reductions() {
+    let out = session("bench 3\n");
+    assert!(
+        out.lines()
+            .any(|line| line.starts_with("info string bench reduced ")),
+        "{out}"
+    );
+}

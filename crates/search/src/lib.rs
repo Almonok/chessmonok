@@ -20,6 +20,7 @@ mod killers;
 mod null_move;
 mod ordering;
 mod position_key;
+mod reductions;
 mod repetition;
 mod statistics;
 mod transposition;
@@ -275,13 +276,16 @@ impl<E: Evaluator> Searcher<E> {
             &self.history,
             pos.turn(),
         );
+        let in_check = pos.is_check();
         let alpha_on_entry = alpha;
         let mut best = -INF;
         let mut best_move = None;
         let mut quiet_moves_tried = MoveList::new();
         for (move_index, &chess_move) in moves.iter().enumerate() {
             let child = self.play(pos, chess_move, ply);
-            let score = -self.negamax(&child, depth - 1, ply + 1, -beta, -alpha, stop);
+            let score = self.search_after_move(
+                &child, chess_move, depth, ply, alpha, beta, move_index, in_check, stop,
+            );
             if self.aborted {
                 // The scores of an unfinished subtree are not results: nothing
                 // from here on reaches the table.
@@ -322,6 +326,82 @@ impl<E: Evaluator> Searcher<E> {
             },
         );
         best
+    }
+
+    /// The score of `chess_move`, which led to `child`, from the side to
+    /// move at `ply`, searched as principal variation search (PVS) with
+    /// late-move reductions does.
+    ///
+    /// The first move is searched with the full window: it is probably the
+    /// best, and its exact score becomes `alpha`, the score to beat. Every
+    /// later move only has to answer "is it better than `alpha`?", which a
+    /// zero window `(alpha, alpha + 1)` answers far more cheaply, since the
+    /// first refutation found settles it. A late quiet move asks it at a
+    /// reduced depth first (`reductions`), and again at full depth if the
+    /// answer is yes. Only a move still saying yes, and below `beta`, is
+    /// searched again with the full window for its exact score. At a node
+    /// that was itself given a zero window, `beta == alpha + 1`: a yes is
+    /// already a cutoff, and never re-searched.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the move, the node's window and its place in the tree, as negamax has them"
+    )]
+    fn search_after_move(
+        &mut self,
+        child: &Chess,
+        chess_move: Move,
+        depth: u32,
+        ply: usize,
+        alpha: i32,
+        beta: i32,
+        move_index: usize,
+        in_check: bool,
+        stop: &AtomicBool,
+    ) -> i32 {
+        if move_index == 0 {
+            return -self.negamax(child, depth - 1, ply + 1, -beta, -alpha, stop);
+        }
+        let reduction =
+            if reductions::may_reduce(depth, move_index, chess_move, in_check, child.is_check()) {
+                reductions::late_move_reduction(depth, move_index)
+            } else {
+                0
+            };
+        let mut score = self.zero_window_search(child, depth - 1 - reduction, ply, alpha, stop);
+        if self.aborted {
+            return 0;
+        }
+        if reduction > 0 {
+            let surprised = score > alpha;
+            self.statistics.record_reduced_search(surprised);
+            if surprised {
+                score = self.zero_window_search(child, depth - 1, ply, alpha, stop);
+                if self.aborted {
+                    return 0;
+                }
+            }
+        }
+        let beats_the_first_move = score > alpha && score < beta;
+        self.statistics
+            .record_zero_window_search(beats_the_first_move);
+        if beats_the_first_move {
+            return -self.negamax(child, depth - 1, ply + 1, -beta, -alpha, stop);
+        }
+        score
+    }
+
+    /// The score of `child` at `depth`, from the side to move at `ply`, as
+    /// far as the zero window `(alpha, alpha + 1)` tells it: only whether it
+    /// is above `alpha` is exact.
+    fn zero_window_search(
+        &mut self,
+        child: &Chess,
+        depth: u32,
+        ply: usize,
+        alpha: i32,
+        stop: &AtomicBool,
+    ) -> i32 {
+        -self.negamax(child, depth, ply + 1, -alpha - 1, -alpha, stop)
     }
 
     fn quiesce(
@@ -506,11 +586,12 @@ impl<E: Evaluator> Searcher<E> {
 /// The score a remembered entry lets this node return without searching, if
 /// it was searched at least `depth` deep and its bound settles the window.
 ///
-/// This cuts at every node below the root, PV nodes included. Plain
-/// alpha-beta searches nearly every node with a wide window, so restricting
-/// cutoffs to zero-window ("non-PV") nodes, as engines with principal
-/// variation search do, would leave almost nothing to cut. The cost is that a
-/// cutoff ends the reported PV early at that node.
+/// This cuts at every node below the root, PV nodes included. Engines with
+/// principal variation search often cut only at zero-window ("non-PV")
+/// nodes, which keeps the reported PV whole; chessmonok keeps cutting at PV
+/// nodes for now, on purpose, so that PVS was measured on its own. Limiting
+/// the cutoffs is a later step with its own measurement. The cost meanwhile
+/// is that a cutoff ends the reported PV early at that node.
 fn table_cutoff(entry: TableEntry, depth: u32, ply: usize, alpha: i32, beta: i32) -> Option<i32> {
     if entry.depth < depth {
         return None;
@@ -549,9 +630,16 @@ fn is_mate(score: i32) -> bool {
     score.abs() >= MATE_BOUND
 }
 
-/// Whether `score`, from an iteration `depth` plies deep, is a mate no deeper
-/// iteration can shorten: the iteration looked at every line up to `depth`
-/// plies, so a mate within that distance is the shortest there is.
+/// Whether `score`, from an iteration `depth` plies deep, is a mate found
+/// within that iteration's own reach, where iterative deepening stops.
+///
+/// Before late-move reductions this was the shortest mate there is: the
+/// iteration looked at every line up to `depth` plies. With reductions it
+/// is not quite: a quiet first move tried late is searched shallower, so a
+/// shorter mate starting with one can be missed while a longer one is found.
+/// The mate found is still a proven mate (a reduced line that reaches one is
+/// searched again at full depth), and its distance falls with every move
+/// played, so the engine still mates; only a little later than it could.
 ///
 /// A mate further away than `depth` came from the transposition table, where
 /// an earlier search left it: a shorter one may be waiting a few iterations
