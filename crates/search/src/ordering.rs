@@ -12,16 +12,20 @@
 //!
 //! ```text
 //! the remembered move (transposition table)   i32::MAX
-//! captures and promotions                     2_000_000 + MVV-LVA
+//! captures and promotions that do not lose    2_000_000 + MVV-LVA
 //! first killer, second killer (`killers`)     1_000_000, 999_000
 //! other quiet moves (`history`)               8 x history - attacker
+//! captures and promotions that lose material  -1_000_000 + MVV-LVA
 //! ```
 //!
 //! MVV-LVA is "most valuable victim, least valuable attacker":
 //! `10 x victim + 10 x promotion - attacker`, so taking a queen comes before
 //! taking a pawn, and taking it with a pawn before taking it with the queen.
 //! A capture is tried before any quiet move because it changes the material
-//! balance, which is what most refutations do. Killers come next: quiet
+//! balance, which is what most refutations do, unless static exchange
+//! evaluation (`see`) shows it loses material once the recaptures are played
+//! out: such a capture rarely refutes anything and goes last. Killers come
+//! after the good captures: quiet
 //! moves that refuted a sibling position. Other quiet moves go last, by how
 //! often they caused cutoffs so far; the `- attacker` term only breaks ties,
 //! which are common early in a search, when most history scores are still 0.
@@ -34,10 +38,11 @@
 
 use std::cmp::Reverse;
 
-use shakmaty::{Color, Move, MoveList};
+use shakmaty::{Chess, Move, MoveList, Position};
 
 use crate::PackedMove;
 use crate::history::{HISTORY_LIMIT, History};
+use crate::see::static_exchange;
 
 /// Above every killer and quiet move, below the remembered move.
 const CAPTURE_SCORE: i32 = 2_000_000;
@@ -46,19 +51,24 @@ const SECOND_KILLER_SCORE: i32 = 999_000;
 /// History is multiplied by this so that the piece only breaks ties.
 const HISTORY_WEIGHT: i32 = 8;
 const _: () = assert!(HISTORY_WEIGHT * HISTORY_LIMIT < SECOND_KILLER_SCORE);
+/// Below every quiet move, however bad its history.
+const LOSING_CAPTURE_SCORE: i32 = -1_000_000;
+const _: () = assert!(LOSING_CAPTURE_SCORE + 200 < -HISTORY_WEIGHT * HISTORY_LIMIT - 6);
 
-/// Order the moves of a node of the main search, best guess first.
+/// Order the moves of `position`, a node of the main search, best guess
+/// first.
 ///
 /// The remembered move and the killers are only hints (another position may
 /// share the table slot; a killer comes from a sibling): each counts only if
 /// it is one of these legal moves, which sorting cannot add to.
 pub(crate) fn order_moves(
     moves: &mut MoveList,
+    position: &Chess,
     remembered: Option<PackedMove>,
     killers: [Option<Move>; 2],
     history: &History,
-    side_to_move: Color,
 ) {
+    let side_to_move = position.turn();
     // `sort_by_cached_key` scores each move once; `sort_by_key` would score
     // it at every comparison, about eight times per move, and each score
     // reads the killers and the history table. Still a stable sort.
@@ -67,7 +77,12 @@ pub(crate) fn order_moves(
         Reverse(if is_remembered {
             i32::MAX
         } else if !is_quiet(candidate) {
-            CAPTURE_SCORE + material_score(candidate)
+            let bucket = if static_exchange(position, candidate) >= 0 {
+                CAPTURE_SCORE
+            } else {
+                LOSING_CAPTURE_SCORE
+            };
+            bucket + material_score(candidate)
         } else if killers[0] == Some(candidate) {
             FIRST_KILLER_SCORE
         } else if killers[1] == Some(candidate) {
@@ -135,12 +150,45 @@ mod tests {
         let mut moves = position.legal_moves();
         order_moves(
             &mut moves,
+            &position,
             remembered.map(PackedMove::new),
             killers,
             history,
-            position.turn(),
         );
         moves
+    }
+
+    #[test]
+    fn a_losing_capture_comes_after_every_quiet_move() {
+        // The e6 pawn defends d5: Qxd5 loses the queen and Nxd5 the knight,
+        // each for a pawn.
+        const LOSING_CAPTURES: &str = "4k3/8/4p3/3p4/8/2N5/8/3QK3 w - - 0 1";
+        let board = position(LOSING_CAPTURES);
+        let losing = [parse_move(&board, "d1d5"), parse_move(&board, "c3d5")];
+        let moves = ordered(LOSING_CAPTURES, None, [None, None]);
+        let first_losing_index = moves
+            .iter()
+            .position(|candidate| losing.contains(candidate))
+            .unwrap();
+        for (index, &candidate) in moves.iter().enumerate() {
+            if is_quiet(candidate) {
+                assert!(
+                    index < first_losing_index,
+                    "{candidate:?} after a losing capture"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_winning_capture_comes_before_the_killers() {
+        const WINNING_CAPTURE: &str = "4k3/8/8/3n4/4P3/8/8/4K3 w - - 0 1";
+        let board = position(WINNING_CAPTURE);
+        let pawn_takes = parse_move(&board, "e4d5");
+        let killer = parse_move(&board, "e1d2");
+        let moves = ordered(WINNING_CAPTURE, None, [Some(killer), None]);
+        assert_eq!(moves[0], pawn_takes);
+        assert_eq!(moves[1], killer);
     }
 
     #[test]
@@ -162,18 +210,26 @@ mod tests {
     }
 
     #[test]
-    fn killers_come_after_captures_and_before_other_quiet_moves() {
-        let killer = parse_move(&position(QUIET_MIDDLEGAME), "a3a4");
+    fn killers_come_after_safe_captures_and_before_other_quiet_moves() {
+        let board = position(QUIET_MIDDLEGAME);
+        let killer = parse_move(&board, "a3a4");
         let moves = ordered(QUIET_MIDDLEGAME, None, [Some(killer), None]);
         let killer_index = moves
             .iter()
             .position(|&candidate| candidate == killer)
             .unwrap();
         for (index, &candidate) in moves.iter().enumerate() {
-            if candidate.is_capture() || candidate.is_promotion() {
+            if is_quiet(candidate) {
+                if candidate != killer {
+                    assert!(index > killer_index, "{candidate:?} before the killer");
+                }
+            } else if static_exchange(&board, candidate) >= 0 {
                 assert!(index < killer_index, "{candidate:?} after the killer");
-            } else if candidate != killer {
-                assert!(index > killer_index, "{candidate:?} before the killer");
+            } else {
+                assert!(
+                    index > killer_index,
+                    "losing {candidate:?} before the killer"
+                );
             }
         }
     }

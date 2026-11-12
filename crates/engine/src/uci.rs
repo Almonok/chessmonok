@@ -213,6 +213,13 @@ impl<W: Write + Send + 'static> Engine<W> {
                 result.statistics.reverse_futility_cutoffs
             ),
         );
+        send(
+            &self.out,
+            &format!(
+                "info string bench losing captures skipped {}",
+                result.statistics.losing_captures_skipped
+            ),
+        );
     }
 
     fn go(&mut self, limits: Limits) {

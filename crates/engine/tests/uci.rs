@@ -320,3 +320,13 @@ fn bench_reports_reverse_futility_cutoffs() {
         "{out}"
     );
 }
+
+#[test]
+fn bench_reports_losing_captures_skipped() {
+    let out = session("bench 3\n");
+    assert!(
+        out.lines()
+            .any(|line| line.starts_with("info string bench losing captures skipped ")),
+        "{out}"
+    );
+}

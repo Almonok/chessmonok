@@ -26,7 +26,9 @@
 //! how often a late move turned out good.
 //!
 //! Reverse futility pruning cuts nodes before any move is tried; their count
-//! shows how much of the tree it removes.
+//! shows how much of the tree it removes. Quiescence skips the captures that
+//! static exchange evaluation shows losing; their count shows how many
+//! subtrees that saves.
 
 use std::ops::Add;
 
@@ -48,11 +50,17 @@ pub struct SearchStatistics {
     pub reduced_re_searches: u64,
     /// Nodes cut by reverse futility pruning, on their static evaluation.
     pub reverse_futility_cutoffs: u64,
+    /// Captures quiescence did not search because they lose material.
+    pub losing_captures_skipped: u64,
 }
 
 impl SearchStatistics {
     pub(crate) fn record_reverse_futility_cutoff(&mut self) {
         self.reverse_futility_cutoffs += 1;
+    }
+
+    pub(crate) fn record_losing_capture_skipped(&mut self) {
+        self.losing_captures_skipped += 1;
     }
 
     pub(crate) fn record_cutoff(&mut self, on_first_move: bool) {
@@ -108,6 +116,7 @@ impl Add for SearchStatistics {
             reduced_re_searches: self.reduced_re_searches + other.reduced_re_searches,
             reverse_futility_cutoffs: self.reverse_futility_cutoffs
                 + other.reverse_futility_cutoffs,
+            losing_captures_skipped: self.losing_captures_skipped + other.losing_captures_skipped,
         }
     }
 }

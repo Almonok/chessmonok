@@ -14,8 +14,10 @@
 //! Moves are searched best guess first (`ordering`): the remembered move,
 //! then captures, then quiet moves that refuted a sibling position at the
 //! same ply (`killers`), then the other quiet moves by how often they caused
-//! cutoffs so far (`history`). `statistics` counts how often the first move
-//! tried was the one that cut, the quick measure of that order.
+//! cutoffs so far (`history`), and last the captures that static exchange
+//! evaluation (`see`) shows losing material; quiescence skips those
+//! altogether. `statistics` counts how often the first move tried was the
+//! one that cut, the quick measure of that order.
 
 mod history;
 mod killers;
@@ -25,6 +27,7 @@ mod position_key;
 mod reductions;
 mod repetition;
 mod reverse_futility;
+mod see;
 mod statistics;
 mod transposition;
 
@@ -279,10 +282,10 @@ impl<E: Evaluator> Searcher<E> {
         }
         ordering::order_moves(
             &mut moves,
+            pos,
             remembered.and_then(|entry| entry.best_move),
             self.killers.at(ply),
             &self.history,
-            pos.turn(),
         );
         let alpha_on_entry = alpha;
         let mut best = -INF;
@@ -448,6 +451,15 @@ impl<E: Evaluator> Searcher<E> {
         }
         ordering::order_captures(&mut moves);
         for &chess_move in &moves {
+            // Out of check the side to move may stand pat, so a capture
+            // matters only if it can lift the score above the static
+            // evaluation. One that loses material once the recaptures are
+            // played out almost never does, and searching its recaptures
+            // is where quiescence spends most of its nodes.
+            if !in_check && see::static_exchange(pos, chess_move) < 0 {
+                self.statistics.record_losing_capture_skipped();
+                continue;
+            }
             let child = self.play(pos, chess_move, ply);
             let score = -self.quiesce(&child, ply + 1, -beta, -alpha, stop);
             if self.aborted {

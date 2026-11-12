@@ -448,6 +448,13 @@ fn reverse_futility_pruning_cuts_nodes_far_above_beta() {
     assert!(statistics.reverse_futility_cutoffs > 0);
 }
 
+#[test]
+fn quiescence_skips_captures_that_lose_material() {
+    // Kiwipete's queens, rooks and minor pieces face many defended pawns.
+    let statistics = run(KIWIPETE, 5).statistics;
+    assert!(statistics.losing_captures_skipped > 0);
+}
+
 /// A smoke test: a search cut short by time, with reduced searches and
 /// re-searches in flight, still returns a legal move. It cannot choose where
 /// the stop lands; `search_after_move` returns 0 after every child search
