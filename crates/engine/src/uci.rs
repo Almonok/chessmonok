@@ -206,6 +206,13 @@ impl<W: Write + Send + 'static> Engine<W> {
                 result.statistics.reduced_re_search_rate() * 100.0
             ),
         );
+        send(
+            &self.out,
+            &format!(
+                "info string bench reverse-futility cutoffs {}",
+                result.statistics.reverse_futility_cutoffs
+            ),
+        );
     }
 
     fn go(&mut self, limits: Limits) {

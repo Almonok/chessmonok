@@ -5,8 +5,10 @@
 //! the leaves. A transposition table (`transposition`), shared across
 //! searches, remembers each node's result: it orders the remembered best move
 //! first and ends the search of a node that was already searched deep enough.
-//! Null-move pruning (`null_move`) cuts nodes where even passing the turn
-//! keeps the side to move at beta. A position that repeats an earlier one, in
+//! Reverse futility pruning (`reverse_futility`) cuts shallow nodes whose
+//! static evaluation is already far above beta, and null-move pruning
+//! (`null_move`) nodes where even passing the turn keeps the side to move at
+//! beta. A position that repeats an earlier one, in
 //! the game or in the searched line, scores as a draw (`repetition`).
 //!
 //! Moves are searched best guess first (`ordering`): the remembered move,
@@ -22,6 +24,7 @@ mod ordering;
 mod position_key;
 mod reductions;
 mod repetition;
+mod reverse_futility;
 mod statistics;
 mod transposition;
 
@@ -258,7 +261,12 @@ impl<E: Evaluator> Searcher<E> {
                 return score;
             }
         }
-        if let Some(score) = self.null_move_cutoff(pos, depth, ply, beta, stop) {
+        let in_check = pos.is_check();
+        let static_evaluation = self.static_evaluation(pos, ply, in_check);
+        if let Some(score) = self.reverse_futility_cutoff(depth, alpha, beta, static_evaluation) {
+            return score;
+        }
+        if let Some(score) = self.null_move_cutoff(pos, depth, ply, beta, static_evaluation, stop) {
             return score;
         }
         // The pass search may have run out of time: nothing it saw is a result.
@@ -267,7 +275,7 @@ impl<E: Evaluator> Searcher<E> {
         }
         let mut moves = pos.legal_moves();
         if moves.is_empty() {
-            return if pos.is_check() { mated(ply) } else { 0 };
+            return if in_check { mated(ply) } else { 0 };
         }
         ordering::order_moves(
             &mut moves,
@@ -276,7 +284,6 @@ impl<E: Evaluator> Searcher<E> {
             &self.history,
             pos.turn(),
         );
-        let in_check = pos.is_check();
         let alpha_on_entry = alpha;
         let mut best = -INF;
         let mut best_move = None;
@@ -483,6 +490,37 @@ impl<E: Evaluator> Searcher<E> {
         child
     }
 
+    /// The evaluation of the position at `ply` before any move, which both
+    /// pruning steps compare to beta: evaluated once here rather than by
+    /// each. `None` at the root, which is never pruned, and in check, where
+    /// it would ignore that the king must be saved.
+    fn static_evaluation(&self, pos: &Chess, ply: usize, in_check: bool) -> Option<i32> {
+        (ply > 0 && !in_check).then(|| self.eval.evaluate(&self.states[ply], pos))
+    }
+
+    /// The score that ends this node before any move is searched, when its
+    /// static evaluation is far enough above `beta` (`reverse_futility`).
+    ///
+    /// Only at zero-window nodes: at a principal-variation node the exact
+    /// score and the line are wanted, not just "at least beta". The cutoff
+    /// is not stored in the table: one evaluation finds it again, and an
+    /// entry would claim a searched depth that was never searched.
+    fn reverse_futility_cutoff(
+        &mut self,
+        depth: u32,
+        alpha: i32,
+        beta: i32,
+        static_evaluation: Option<i32>,
+    ) -> Option<i32> {
+        let zero_window = beta - alpha == 1;
+        if !zero_window {
+            return None;
+        }
+        let score = reverse_futility::cutoff_score(depth, static_evaluation?, beta)?;
+        self.statistics.record_reverse_futility_cutoff();
+        Some(score)
+    }
+
     /// The score that ends this node through a pass, if one is allowed and
     /// the passed position, searched shallower, still reaches `beta`.
     ///
@@ -496,9 +534,10 @@ impl<E: Evaluator> Searcher<E> {
         depth: u32,
         ply: usize,
         beta: i32,
+        static_evaluation: Option<i32>,
         stop: &AtomicBool,
     ) -> Option<i32> {
-        if !self.may_pass(pos, depth, ply, beta) {
+        if !self.may_pass(pos, depth, ply, beta, static_evaluation?) {
             return None;
         }
         let passed_position = self.play_pass(pos, ply)?;
@@ -529,16 +568,21 @@ impl<E: Evaluator> Searcher<E> {
         Some(score)
     }
 
-    /// The guards of null-move pruning, cheapest first; the static evaluation
-    /// comes last because it is the only costly one.
-    fn may_pass(&self, pos: &Chess, depth: u32, ply: usize, beta: i32) -> bool {
-        ply > 0
-            && depth >= null_move::MINIMUM_DEPTH
+    /// The guards of null-move pruning. The root and positions in check
+    /// have no static evaluation, so the caller never asks for them.
+    fn may_pass(
+        &self,
+        pos: &Chess,
+        depth: u32,
+        ply: usize,
+        beta: i32,
+        static_evaluation: i32,
+    ) -> bool {
+        depth >= null_move::MINIMUM_DEPTH
             && !self.passed[ply]
             && !is_mate(beta)
-            && !pos.is_check()
+            && static_evaluation >= beta
             && null_move::has_pieces_besides_pawns(pos)
-            && self.eval.evaluate(&self.states[ply], pos) >= beta
     }
 
     /// Like `play`, for a pass. No piece moves, so the evaluation state is

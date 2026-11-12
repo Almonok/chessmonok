@@ -310,3 +310,13 @@ fn bench_reports_reductions() {
         "{out}"
     );
 }
+
+#[test]
+fn bench_reports_reverse_futility_cutoffs() {
+    let out = session("bench 3\n");
+    assert!(
+        out.lines()
+            .any(|line| line.starts_with("info string bench reverse-futility cutoffs ")),
+        "{out}"
+    );
+}

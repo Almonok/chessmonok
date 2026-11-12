@@ -24,6 +24,9 @@
 //! first, and at full depth only when the shallow search says they beat the
 //! best move so far. The share of reduced searches re-searched that way is
 //! how often a late move turned out good.
+//!
+//! Reverse futility pruning cuts nodes before any move is tried; their count
+//! shows how much of the tree it removes.
 
 use std::ops::Add;
 
@@ -43,9 +46,15 @@ pub struct SearchStatistics {
     /// Those of them that beat the best move so far and were searched again
     /// at full depth.
     pub reduced_re_searches: u64,
+    /// Nodes cut by reverse futility pruning, on their static evaluation.
+    pub reverse_futility_cutoffs: u64,
 }
 
 impl SearchStatistics {
+    pub(crate) fn record_reverse_futility_cutoff(&mut self) {
+        self.reverse_futility_cutoffs += 1;
+    }
+
     pub(crate) fn record_cutoff(&mut self, on_first_move: bool) {
         self.cutoffs += 1;
         if on_first_move {
@@ -97,6 +106,8 @@ impl Add for SearchStatistics {
             zero_window_re_searches: self.zero_window_re_searches + other.zero_window_re_searches,
             reduced_searches: self.reduced_searches + other.reduced_searches,
             reduced_re_searches: self.reduced_re_searches + other.reduced_re_searches,
+            reverse_futility_cutoffs: self.reverse_futility_cutoffs
+                + other.reverse_futility_cutoffs,
         }
     }
 }
