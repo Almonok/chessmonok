@@ -220,6 +220,13 @@ impl<W: Write + Send + 'static> Engine<W> {
                 result.statistics.losing_captures_skipped
             ),
         );
+        send(
+            &self.out,
+            &format!(
+                "info string bench aspiration re-searches {}",
+                result.statistics.aspiration_re_searches
+            ),
+        );
     }
 
     fn go(&mut self, limits: Limits) {

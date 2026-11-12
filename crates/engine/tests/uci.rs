@@ -330,3 +330,13 @@ fn bench_reports_losing_captures_skipped() {
         "{out}"
     );
 }
+
+#[test]
+fn bench_reports_aspiration_re_searches() {
+    let out = session("bench 3\n");
+    assert!(
+        out.lines()
+            .any(|line| line.starts_with("info string bench aspiration re-searches ")),
+        "{out}"
+    );
+}

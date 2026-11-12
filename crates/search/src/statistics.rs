@@ -29,6 +29,9 @@
 //! shows how much of the tree it removes. Quiescence skips the captures that
 //! static exchange evaluation shows losing; their count shows how many
 //! subtrees that saves.
+//!
+//! Aspiration windows bet that an iteration scores close to the last one;
+//! each re-search of the root is a lost bet.
 
 use std::ops::Add;
 
@@ -52,11 +55,18 @@ pub struct SearchStatistics {
     pub reverse_futility_cutoffs: u64,
     /// Captures quiescence did not search because they lose material.
     pub losing_captures_skipped: u64,
+    /// Root searches repeated because the score fell outside the
+    /// aspiration window.
+    pub aspiration_re_searches: u64,
 }
 
 impl SearchStatistics {
     pub(crate) fn record_reverse_futility_cutoff(&mut self) {
         self.reverse_futility_cutoffs += 1;
+    }
+
+    pub(crate) fn record_aspiration_re_search(&mut self) {
+        self.aspiration_re_searches += 1;
     }
 
     pub(crate) fn record_losing_capture_skipped(&mut self) {
@@ -117,6 +127,7 @@ impl Add for SearchStatistics {
             reverse_futility_cutoffs: self.reverse_futility_cutoffs
                 + other.reverse_futility_cutoffs,
             losing_captures_skipped: self.losing_captures_skipped + other.losing_captures_skipped,
+            aspiration_re_searches: self.aspiration_re_searches + other.aspiration_re_searches,
         }
     }
 }

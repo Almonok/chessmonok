@@ -2,7 +2,8 @@
 //!
 //! Iterative deepening runs a negamax alpha-beta search to depth 1, 2, 3...
 //! until the time or depth limit, with a capture-only quiescence search at
-//! the leaves. A transposition table (`transposition`), shared across
+//! the leaves. From depth 4 each iteration starts in a narrow window around
+//! the previous score (`aspiration`). A transposition table (`transposition`), shared across
 //! searches, remembers each node's result: it orders the remembered best move
 //! first and ends the search of a node that was already searched deep enough.
 //! Reverse futility pruning (`reverse_futility`) cuts shallow nodes whose
@@ -19,6 +20,7 @@
 //! altogether. `statistics` counts how often the first move tried was the
 //! one that cut, the quick measure of that order.
 
+mod aspiration;
 mod history;
 mod killers;
 mod null_move;
@@ -36,6 +38,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use aspiration::AspirationWindow;
 use eval::{Evaluator, dirty_pieces};
 use history::History;
 use killers::Killers;
@@ -206,7 +209,7 @@ impl<E: Evaluator> Searcher<E> {
         for depth in 1..=limits.depth.unwrap_or(MAX_DEPTH) {
             self.can_abort = depth > 1;
             self.aborted = false;
-            let score = self.negamax(pos, depth, 0, -INF, INF, stop);
+            let score = self.search_root(pos, depth, best.score, stop);
             if self.aborted {
                 break;
             }
@@ -227,6 +230,35 @@ impl<E: Evaluator> Searcher<E> {
         best.nodes = self.nodes;
         best.statistics = self.statistics;
         best
+    }
+
+    /// One iteration: the root searched `depth` plies deep, through an
+    /// aspiration window around `previous_score` once the search is deep
+    /// enough for that score to be a good guess, widened until the score
+    /// falls inside it.
+    fn search_root(
+        &mut self,
+        pos: &Chess,
+        depth: u32,
+        previous_score: i32,
+        stop: &AtomicBool,
+    ) -> i32 {
+        let mut window = if depth >= aspiration::MINIMUM_DEPTH {
+            AspirationWindow::around(previous_score)
+        } else {
+            AspirationWindow::FULL
+        };
+        loop {
+            let score = self.negamax(pos, depth, 0, window.alpha, window.beta, stop);
+            if self.aborted {
+                return score;
+            }
+            let Some(wider) = window.widened_after(score) else {
+                return score;
+            };
+            self.statistics.record_aspiration_re_search();
+            window = wider;
+        }
     }
 
     fn negamax(
