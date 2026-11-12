@@ -340,3 +340,13 @@ fn bench_reports_aspiration_re_searches() {
         "{out}"
     );
 }
+
+#[test]
+fn bench_reports_quiet_moves_pruned() {
+    let out = session("bench 3\n");
+    assert!(
+        out.lines()
+            .any(|line| line.starts_with("info string bench quiet moves pruned late ")),
+        "{out}"
+    );
+}

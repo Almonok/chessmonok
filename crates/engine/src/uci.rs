@@ -227,6 +227,13 @@ impl<W: Write + Send + 'static> Engine<W> {
                 result.statistics.aspiration_re_searches
             ),
         );
+        send(
+            &self.out,
+            &format!(
+                "info string bench quiet moves pruned late {} futile {}",
+                result.statistics.late_moves_pruned, result.statistics.futile_moves_pruned
+            ),
+        );
     }
 
     fn go(&mut self, limits: Limits) {

@@ -31,9 +31,12 @@
 //! subtrees that saves.
 //!
 //! Aspiration windows bet that an iteration scores close to the last one;
-//! each re-search of the root is a lost bet.
+//! each re-search of the root is a lost bet. Quiet-move pruning skips moves
+//! unsearched, counted by the rule that skipped them.
 
 use std::ops::Add;
+
+use crate::quiet_pruning::QuietPruning;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SearchStatistics {
@@ -58,11 +61,22 @@ pub struct SearchStatistics {
     /// Root searches repeated because the score fell outside the
     /// aspiration window.
     pub aspiration_re_searches: u64,
+    /// Quiet moves skipped because enough quiet moves were searched first.
+    pub late_moves_pruned: u64,
+    /// Quiet moves skipped because they could not lift the node to alpha.
+    pub futile_moves_pruned: u64,
 }
 
 impl SearchStatistics {
     pub(crate) fn record_reverse_futility_cutoff(&mut self) {
         self.reverse_futility_cutoffs += 1;
+    }
+
+    pub(crate) fn record_quiet_move_pruned(&mut self, reason: QuietPruning) {
+        match reason {
+            QuietPruning::LateMove => self.late_moves_pruned += 1,
+            QuietPruning::Futility => self.futile_moves_pruned += 1,
+        }
     }
 
     pub(crate) fn record_aspiration_re_search(&mut self) {
@@ -128,6 +142,8 @@ impl Add for SearchStatistics {
                 + other.reverse_futility_cutoffs,
             losing_captures_skipped: self.losing_captures_skipped + other.losing_captures_skipped,
             aspiration_re_searches: self.aspiration_re_searches + other.aspiration_re_searches,
+            late_moves_pruned: self.late_moves_pruned + other.late_moves_pruned,
+            futile_moves_pruned: self.futile_moves_pruned + other.futile_moves_pruned,
         }
     }
 }

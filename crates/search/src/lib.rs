@@ -7,7 +7,9 @@
 //! searches, remembers each node's result: it orders the remembered best move
 //! first and ends the search of a node that was already searched deep enough.
 //! Reverse futility pruning (`reverse_futility`) cuts shallow nodes whose
-//! static evaluation is already far above beta, and null-move pruning
+//! static evaluation is already far above beta, quiet-move pruning
+//! (`quiet_pruning`) skips the quiet moves of shallow nodes that cannot
+//! matter, and null-move pruning
 //! (`null_move`) nodes where even passing the turn keeps the side to move at
 //! beta. A position that repeats an earlier one, in
 //! the game or in the searched line, scores as a draw (`repetition`).
@@ -26,6 +28,7 @@ mod killers;
 mod null_move;
 mod ordering;
 mod position_key;
+mod quiet_pruning;
 mod reductions;
 mod repetition;
 mod reverse_futility;
@@ -289,12 +292,11 @@ impl<E: Evaluator> Searcher<E> {
         let remembered = self.table.probe(key);
         // Never at the root: the root must produce a move and a PV, which a
         // stored score alone does not give.
-        if ply > 0 {
-            if let Some(score) =
+        if ply > 0
+            && let Some(score) =
                 remembered.and_then(|entry| table_cutoff(entry, depth, ply, alpha, beta))
-            {
-                return score;
-            }
+        {
+            return score;
         }
         let in_check = pos.is_check();
         let static_evaluation = self.static_evaluation(pos, ply, in_check);
@@ -323,8 +325,24 @@ impl<E: Evaluator> Searcher<E> {
         let mut best = -INF;
         let mut best_move = None;
         let mut quiet_moves_tried = MoveList::new();
+        // Quiet moves may be skipped only at zero-window nodes with a static
+        // evaluation, so not at the root nor in check (`quiet_pruning`).
+        let pruning_evaluation = static_evaluation.filter(|_| beta - alpha == 1);
         for (move_index, &chess_move) in moves.iter().enumerate() {
-            let child = self.play(pos, chess_move, ply);
+            let child = position_after(pos, chess_move);
+            if let Some(reason) = quiet_move_skip_reason(
+                chess_move,
+                &child,
+                depth,
+                pruning_evaluation,
+                alpha,
+                best,
+                quiet_moves_tried.len(),
+            ) {
+                self.statistics.record_quiet_move_pruned(reason);
+                continue;
+            }
+            self.enter_child(pos, chess_move, &child, ply);
             let score = self.search_after_move(
                 &child, chess_move, depth, ply, alpha, beta, move_index, in_check, stop,
             );
@@ -343,15 +361,7 @@ impl<E: Evaluator> Searcher<E> {
             }
             if alpha >= beta {
                 self.statistics.record_cutoff(move_index == 0);
-                if ordering::is_quiet(chess_move) {
-                    self.learn_from_quiet_cutoff(
-                        pos.turn(),
-                        chess_move,
-                        &quiet_moves_tried,
-                        depth,
-                        ply,
-                    );
-                }
+                self.learn_from_cutoff(pos.turn(), chess_move, &quiet_moves_tried, depth, ply);
                 break;
             }
             if ordering::is_quiet(chess_move) {
@@ -524,19 +534,28 @@ impl<E: Evaluator> Searcher<E> {
             )
     }
 
+    /// Play `chess_move` from `pos`, at `ply`: the position after it, with
+    /// the evaluation state and key of `ply + 1` brought up to date.
     fn play(&mut self, pos: &Chess, chess_move: Move, ply: usize) -> Chess {
+        let child = position_after(pos, chess_move);
+        self.enter_child(pos, chess_move, &child, ply);
+        child
+    }
+
+    /// Bring the evaluation state and key of `ply + 1` up to date for
+    /// `child`, reached from `pos` by `chess_move`. Apart from `play` so
+    /// that a move can be looked at (does it give check?) and skipped
+    /// before paying for the accumulator update.
+    fn enter_child(&mut self, pos: &Chess, chess_move: Move, child: &Chess, ply: usize) {
         let dirty = dirty_pieces(pos, chess_move);
-        let mut child = pos.clone();
-        child.play_unchecked(chess_move);
         // The borrow checker cannot see that `ply` and `ply + 1` are two
         // different slots of one vector; `split_at_mut` proves it, safely,
         // by handing out the two sides of the cut as separate borrows.
         let (up_to_ply, after_ply) = self.states.split_at_mut(ply + 1);
         self.eval
-            .update(&up_to_ply[ply], &mut after_ply[0], &child, &dirty);
-        self.keys[ply + 1] = key_after(pos, self.keys[ply], chess_move, &child);
+            .update(&up_to_ply[ply], &mut after_ply[0], child, &dirty);
+        self.keys[ply + 1] = key_after(pos, self.keys[ply], chess_move, child);
         self.passed[ply + 1] = false;
-        child
     }
 
     /// The evaluation of the position at `ply` before any move, which both
@@ -645,10 +664,11 @@ impl<E: Evaluator> Searcher<E> {
         Some(child)
     }
 
-    /// The quiet move `cutting` reached beta: it becomes a killer at this
-    /// ply and gains history, and the quiet moves tried before it, which did
-    /// not cut, lose history.
-    fn learn_from_quiet_cutoff(
+    /// `cutting` reached beta. A quiet move becomes a killer at this ply and
+    /// gains history, and the quiet moves tried before it, which did not
+    /// cut, lose history. A capture teaches nothing: captures are ordered by
+    /// material, not by history.
+    fn learn_from_cutoff(
         &mut self,
         side_to_move: Color,
         cutting: Move,
@@ -656,6 +676,9 @@ impl<E: Evaluator> Searcher<E> {
         remaining_depth: u32,
         ply: usize,
     ) {
+        if !ordering::is_quiet(cutting) {
+            return;
+        }
         self.killers.record(ply, cutting);
         self.history.reward(side_to_move, cutting, remaining_depth);
         for &failed in quiet_moves_tried {
@@ -708,6 +731,40 @@ fn bound_of(best: i32, alpha_on_entry: i32, beta: i32) -> Bound {
     } else {
         Bound::Upper
     }
+}
+
+/// Why quiet-move pruning (`quiet_pruning`) skips `chess_move`, which leads
+/// to `child`, or `None` when it is searched. `pruning_evaluation` is the
+/// node's static evaluation when the node may skip quiet moves at all.
+///
+/// The guards are a let chain (Rust 2024): `if let` patterns and boolean
+/// conditions joined by `&&`, checked in order and short-circuiting, so the
+/// check test and the rule itself only run for a quiet move at a node that
+/// already has a score better than being mated.
+fn quiet_move_skip_reason(
+    chess_move: Move,
+    child: &Chess,
+    depth: u32,
+    pruning_evaluation: Option<i32>,
+    alpha: i32,
+    best: i32,
+    quiet_moves_searched: usize,
+) -> Option<quiet_pruning::QuietPruning> {
+    if let Some(evaluation) = pruning_evaluation
+        && best > -MATE_BOUND
+        && ordering::is_quiet(chess_move)
+        && !child.is_check()
+    {
+        return quiet_pruning::skip_reason(depth, quiet_moves_searched, evaluation, alpha);
+    }
+    None
+}
+
+/// The position after `chess_move`, a legal move of `pos`.
+fn position_after(pos: &Chess, chess_move: Move) -> Chess {
+    let mut child = pos.clone();
+    child.play_unchecked(chess_move);
+    child
 }
 
 /// A ply count as a score offset: mate scores move by one per ply.
