@@ -484,7 +484,12 @@ impl<E: Evaluator> Searcher<E> {
         let dirty = dirty_pieces(pos, chess_move);
         let mut child = pos.clone();
         child.play_unchecked(chess_move);
-        self.states[ply + 1] = self.eval.update(&self.states[ply], &child, &dirty);
+        // The borrow checker cannot see that `ply` and `ply + 1` are two
+        // different slots of one vector; `split_at_mut` proves it, safely,
+        // by handing out the two sides of the cut as separate borrows.
+        let (up_to_ply, after_ply) = self.states.split_at_mut(ply + 1);
+        self.eval
+            .update(&up_to_ply[ply], &mut after_ply[0], &child, &dirty);
         self.keys[ply + 1] = key_after(pos, self.keys[ply], chess_move, &child);
         self.passed[ply + 1] = false;
         child

@@ -28,7 +28,13 @@ fn assert_update_matches_refresh(before: &Chess, m: Move, context: &str) {
     let dirty = dirty_pieces(before, m);
     let mut after = before.clone();
     after.play_unchecked(m);
-    let updated = parent.update(net, &after, &dirty);
+    // The search hands `update` a slot still holding an older line's
+    // accumulator: the result must not depend on it.
+    let mut updated = Accumulator {
+        white: [1234; L1],
+        black: [-1234; L1],
+    };
+    parent.update(net, &after, &dirty, &mut updated);
     assert_eq!(
         updated,
         Accumulator::refresh(net, &after),

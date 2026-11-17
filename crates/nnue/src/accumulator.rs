@@ -65,26 +65,136 @@ impl Accumulator {
         }
     }
 
-    /// The accumulator after the move whose disturbed pieces are `dirty`,
-    /// computed from this one (the accumulator before the move). `after` is
-    /// the position after the move: it knows where the kings now stand.
-    #[must_use]
-    pub fn update(&self, net: &Network, after: &Chess, dirty: &DirtyPieces) -> Self {
-        let mut updated = self.clone();
+    /// Write into `child` the accumulator after the move whose disturbed
+    /// pieces are `dirty`, computed from this one (the accumulator before
+    /// the move). `after` is the position after the move: it knows where the
+    /// kings now stand. Whatever `child` held is overwritten.
+    pub fn update(
+        &self,
+        net: &Network,
+        after: &Chess,
+        dirty: &DirtyPieces,
+        child: &mut Accumulator,
+    ) {
         for perspective in [Color::White, Color::Black] {
             if own_king_moved(dirty, perspective) {
                 // Every feature of this side depends on its own king's
                 // square, so all of them change: start again from scratch.
-                updated.refresh_half(net, after.board(), perspective);
+                child.refresh_half(net, after.board(), perspective);
             } else {
                 let king = after
                     .board()
                     .king_of(perspective)
                     .expect("a legal position has both kings");
-                apply_dirty_pieces(updated.half_mut(perspective), net, dirty, king, perspective);
+                RowChanges::new(net, dirty, king, perspective)
+                    .apply(self.half(perspective), child.half_mut(perspective));
             }
         }
-        updated
+    }
+}
+
+/// Fills the unused places of `RowChanges`; never read.
+const NO_ROW: &[i16; L1] = &[0; L1];
+
+/// The feature rows one move takes out of a half and puts into it, as seen
+/// from one perspective. Kings are skipped: they have no feature of their
+/// own. A move disturbs at most three pieces, so three places each suffice.
+struct RowChanges<'net> {
+    removed: [&'net [i16; L1]; 3],
+    removed_count: usize,
+    added: [&'net [i16; L1]; 3],
+    added_count: usize,
+}
+
+impl<'net> RowChanges<'net> {
+    /// The row of every piece that left a square is removed, the row of
+    /// every piece that arrived is added.
+    fn new(net: &'net Network, dirty: &DirtyPieces, king: Square, perspective: Color) -> Self {
+        let mut changes = RowChanges {
+            removed: [NO_ROW; 3],
+            removed_count: 0,
+            added: [NO_ROW; 3],
+            added_count: 0,
+        };
+        for moved in dirty.iter().filter(|moved| moved.piece.role != Role::King) {
+            let row = |square| net.ft_row(feature_index(moved.piece, square, king, perspective));
+            if let Some(from) = moved.from {
+                changes.removed[changes.removed_count] = row(from);
+                changes.removed_count += 1;
+            }
+            if let Some(to) = moved.to {
+                changes.added[changes.added_count] = row(to);
+                changes.added_count += 1;
+            }
+        }
+        changes
+    }
+
+    fn removed(&self) -> &[&'net [i16; L1]] {
+        &self.removed[..self.removed_count]
+    }
+
+    fn added(&self) -> &[&'net [i16; L1]] {
+        &self.added[..self.added_count]
+    }
+
+    /// `child = parent - removed rows + added rows`.
+    ///
+    /// The two shapes nearly every move has (one piece moves; or one moves
+    /// and one is captured) are done in a single pass, reading each input
+    /// and writing each output once. Copying the parent first and then
+    /// making one pass per row, as the general case does, reads and writes
+    /// the half once per row on top of the copy.
+    fn apply(&self, parent: &[i16; L1], child: &mut [i16; L1]) {
+        match (self.removed(), self.added()) {
+            ([removed], [added]) => move_one_piece(parent, removed, added, child),
+            ([first_removed, second_removed], [added]) => {
+                move_one_piece_and_capture(parent, first_removed, second_removed, added, child);
+            }
+            (removed_rows, added_rows) => {
+                *child = *parent;
+                for removed in removed_rows {
+                    subtract_row(child, removed);
+                }
+                for added in added_rows {
+                    add_row(child, added);
+                }
+            }
+        }
+    }
+}
+
+/// A quiet move, a castling rook or a promotion: one row out, one row in.
+fn move_one_piece(
+    parent: &[i16; L1],
+    removed: &[i16; L1],
+    added: &[i16; L1],
+    child: &mut [i16; L1],
+) {
+    for (((value, &before), &removed), &added) in
+        child.iter_mut().zip(parent).zip(removed).zip(added)
+    {
+        *value = before - removed + added;
+    }
+}
+
+/// A capture or an en-passant capture: two rows out (the moving piece's
+/// old square and the captured piece), one row in.
+fn move_one_piece_and_capture(
+    parent: &[i16; L1],
+    first_removed: &[i16; L1],
+    second_removed: &[i16; L1],
+    added: &[i16; L1],
+    child: &mut [i16; L1],
+) {
+    for ((((value, &before), &first), &second), &added) in child
+        .iter_mut()
+        .zip(parent)
+        .zip(first_removed)
+        .zip(second_removed)
+        .zip(added)
+    {
+        *value = before - first - second + added;
     }
 }
 
@@ -101,31 +211,6 @@ fn own_king_moved(dirty: &DirtyPieces, perspective: Color) -> bool {
     dirty
         .iter()
         .any(|moved| moved.piece.role == Role::King && moved.piece.color == perspective)
-}
-
-/// Subtract the row of every piece that left a square, add the row of every
-/// piece that arrived. Kings are skipped: they have no feature of their own.
-fn apply_dirty_pieces(
-    half: &mut [i16; L1],
-    net: &Network,
-    dirty: &DirtyPieces,
-    king: Square,
-    perspective: Color,
-) {
-    for moved in dirty.iter().filter(|moved| moved.piece.role != Role::King) {
-        if let Some(from) = moved.from {
-            subtract_row(
-                half,
-                net.ft_row(feature_index(moved.piece, from, king, perspective)),
-            );
-        }
-        if let Some(to) = moved.to {
-            add_row(
-                half,
-                net.ft_row(feature_index(moved.piece, to, king, perspective)),
-            );
-        }
-    }
 }
 
 fn subtract_row(half: &mut [i16; L1], row: &[i16; L1]) {

@@ -39,8 +39,14 @@ impl Evaluator for Nnue {
         Accumulator::refresh(&self.net, pos)
     }
 
-    fn update(&self, parent: &Accumulator, after: &Chess, dirty: &DirtyPieces) -> Accumulator {
-        parent.update(&self.net, after, dirty)
+    fn update(
+        &self,
+        parent: &Accumulator,
+        child: &mut Accumulator,
+        after: &Chess,
+        dirty: &DirtyPieces,
+    ) {
+        parent.update(&self.net, after, dirty, child);
     }
 
     fn evaluate(&self, state: &Accumulator, pos: &Chess) -> i32 {

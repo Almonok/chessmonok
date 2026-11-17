@@ -35,7 +35,9 @@ fn piece_values() {
 }
 
 fn incremental<E: Evaluator>(e: &E, before: &Chess, m: Move, after: &Chess) -> i32 {
-    let state = e.update(&e.refresh(before), after, &dirty_pieces(before, m));
+    let parent = e.refresh(before);
+    let mut state = e.refresh(before);
+    e.update(&parent, &mut state, after, &dirty_pieces(before, m));
     e.evaluate(&state, after)
 }
 

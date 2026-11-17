@@ -12,7 +12,21 @@ pub use material::MaterialEval;
 pub trait Evaluator {
     type State: Clone;
     fn refresh(&self, pos: &Chess) -> Self::State;
-    fn update(&self, parent: &Self::State, after: &Chess, dirty: &DirtyPieces) -> Self::State;
+    /// Write into `child` the state after the move whose disturbed pieces
+    /// are `dirty`, computed from `parent`, the state before it. `after` is
+    /// the position after the move.
+    ///
+    /// `child` is overwritten whatever it held. Writing in place, rather
+    /// than returning a new state, lets the search keep one slot per ply and
+    /// fill it directly: an NNUE state is a kilobyte, and returning it by
+    /// value cost a copy at every node.
+    fn update(
+        &self,
+        parent: &Self::State,
+        child: &mut Self::State,
+        after: &Chess,
+        dirty: &DirtyPieces,
+    );
     /// Centipawns from the side to move.
     fn evaluate(&self, state: &Self::State, pos: &Chess) -> i32;
 }

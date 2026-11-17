@@ -32,13 +32,27 @@ const WEIGHT_SHIFT: u32 = 6;
 const _: () = assert!(1 << WEIGHT_SHIFT == QB);
 
 /// Clamp both halves to `[0, QA]` and concatenate them, side to move first.
+///
+/// One loop per half, not one loop over all `2 * L1` outputs choosing its
+/// half at each index: with that choice inside the loop, the compiler
+/// fetched every vector lane on its own, from an address picked per lane.
+/// Over one contiguous half it loads, clamps and narrows whole vectors.
 pub fn activate(accumulator: &Accumulator, side_to_move: Color) -> [i8; 2 * L1] {
-    let first = accumulator.half(side_to_move);
-    let second = accumulator.half(side_to_move.other());
-    std::array::from_fn(|i| {
-        let value = if i < L1 { first[i] } else { second[i - L1] };
-        clipped(i32::from(value))
-    })
+    let mut activations = [0; 2 * L1];
+    let (side_to_move_activations, other_side_activations) = activations.split_at_mut(L1);
+    clip_half(side_to_move_activations, accumulator.half(side_to_move));
+    clip_half(
+        other_side_activations,
+        accumulator.half(side_to_move.other()),
+    );
+    activations
+}
+
+/// Clamp one accumulator half into `activations`, element by element.
+fn clip_half(activations: &mut [i8], half: &[i16; L1]) {
+    for (activation, &value) in activations.iter_mut().zip(half) {
+        *activation = clipped(i32::from(value));
+    }
 }
 
 /// The first hidden layer: `clamp((l1_weight @ input + l1_bias) >> 6, 0, QA)`.
