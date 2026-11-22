@@ -44,6 +44,9 @@ struct Engine<W> {
     /// already searched while thinking about this one). An `Arc` because the
     /// search runs on its own thread.
     table: Arc<TranspositionTable>,
+    /// The `Hash` option, in MB: the size of `table`, and of the tables
+    /// `bench` searches with.
+    hash_megabytes: usize,
 }
 
 impl<W: Write + Send + 'static> Engine<W> {
@@ -56,6 +59,7 @@ impl<W: Write + Send + 'static> Engine<W> {
             random_mover: false,
             evaluation: Evaluation::Material,
             table: Arc::new(TranspositionTable::new(DEFAULT_HASH_MEGABYTES)),
+            hash_megabytes: DEFAULT_HASH_MEGABYTES,
         }
     }
 
@@ -139,9 +143,8 @@ impl<W: Write + Send + 'static> Engine<W> {
         // Drop the old table before allocating the new one, so a resize
         // never needs both in memory at once.
         self.table = Arc::new(TranspositionTable::new(0));
-        self.table = Arc::new(TranspositionTable::new(
-            megabytes.clamp(1, MAX_HASH_MEGABYTES),
-        ));
+        self.hash_megabytes = megabytes.clamp(1, MAX_HASH_MEGABYTES);
+        self.table = Arc::new(TranspositionTable::new(self.hash_megabytes));
     }
 
     fn load_eval_file(&mut self, path: &str) {
@@ -161,7 +164,7 @@ impl<W: Write + Send + 'static> Engine<W> {
 
     /// `bench [depth]`, a non-standard command: see `bench.rs`.
     fn bench(&mut self, depth: u32) {
-        let Some(result) = run_bench(&self.evaluation, depth) else {
+        let Some(result) = run_bench(&self.evaluation, depth, self.hash_megabytes) else {
             let refusal = format!("info string cannot bench: {}", self.evaluation.describe());
             send(&self.out, &refusal);
             return;
@@ -232,6 +235,17 @@ impl<W: Write + Send + 'static> Engine<W> {
             &format!(
                 "info string bench quiet moves pruned late {} futile {}",
                 result.statistics.late_moves_pruned, result.statistics.futile_moves_pruned
+            ),
+        );
+        send(
+            &self.out,
+            &format!(
+                "info string bench table probes {} hits {} ({:.1}%) cutoffs {} ({:.1}%)",
+                result.statistics.table_probes,
+                result.statistics.table_hits,
+                result.statistics.table_hit_rate() * 100.0,
+                result.statistics.table_cutoffs,
+                result.statistics.table_cutoff_rate() * 100.0
             ),
         );
     }

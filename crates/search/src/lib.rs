@@ -290,12 +290,14 @@ impl<E: Evaluator> Searcher<E> {
         }
         let key = self.keys[ply];
         let remembered = self.table.probe(key);
+        self.statistics.record_table_probe(remembered.is_some());
         // Never at the root: the root must produce a move and a PV, which a
         // stored score alone does not give.
         if ply > 0
             && let Some(score) =
                 remembered.and_then(|entry| table_cutoff(entry, depth, ply, alpha, beta))
         {
+            self.statistics.record_table_cutoff();
             return score;
         }
         let in_check = pos.is_check();
