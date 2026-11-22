@@ -34,7 +34,7 @@ fn piece_values() {
     );
 }
 
-fn incremental<E: Evaluator>(e: &E, before: &Chess, m: Move, after: &Chess) -> i32 {
+fn incremental<E: Evaluator>(e: &mut E, before: &Chess, m: Move, after: &Chess) -> i32 {
     let parent = e.refresh(before);
     let mut state = e.refresh(before);
     e.update(&parent, &mut state, after, &dirty_pieces(before, m));
@@ -47,6 +47,9 @@ fn update_after_a_capture_matches_refresh() {
     let m = "e4d5".parse::<UciMove>().unwrap().to_move(&before).unwrap();
     let mut after = before.clone();
     after.play_unchecked(m);
-    assert_eq!(incremental(&MaterialEval, &before, m, &after), eval(&after));
+    assert_eq!(
+        incremental(&mut MaterialEval, &before, m, &after),
+        eval(&after)
+    );
     assert_eq!(eval(&after), -100);
 }

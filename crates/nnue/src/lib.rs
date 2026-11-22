@@ -9,6 +9,7 @@ mod accumulator;
 pub mod features;
 pub mod forward;
 mod network;
+mod refresh_cache;
 
 use std::sync::Arc;
 
@@ -19,16 +20,20 @@ pub use accumulator::Accumulator;
 pub use network::{
     ARCH, FEATURE_SET, FILE_SIZE, L0, L1, L2, L3, LoadError, Network, OUT_SCALE, QA, QB, fnv1a32,
 };
+pub use refresh_cache::RefreshCache;
 
-/// The NNUE evaluator. Cloning shares the network.
+/// The NNUE evaluator. Cloning shares the network and copies the refresh
+/// cache, which each searcher then keeps up to date on its own.
 #[derive(Clone, Debug)]
 pub struct Nnue {
     net: Arc<Network>,
+    refresh_cache: RefreshCache,
 }
 
 impl Nnue {
     pub fn new(net: Arc<Network>) -> Self {
-        Self { net }
+        let refresh_cache = RefreshCache::new(&net);
+        Self { net, refresh_cache }
     }
 }
 
@@ -40,13 +45,13 @@ impl Evaluator for Nnue {
     }
 
     fn update(
-        &self,
+        &mut self,
         parent: &Accumulator,
         child: &mut Accumulator,
         after: &Chess,
         dirty: &DirtyPieces,
     ) {
-        parent.update(&self.net, after, dirty, child);
+        parent.update(&self.net, after, dirty, child, &mut self.refresh_cache);
     }
 
     fn evaluate(&self, state: &Accumulator, pos: &Chess) -> i32 {

@@ -20,8 +20,11 @@ pub trait Evaluator {
     /// than returning a new state, lets the search keep one slot per ply and
     /// fill it directly: an NNUE state is a kilobyte, and returning it by
     /// value cost a copy at every node.
+    ///
+    /// `&mut self`: an evaluator may keep caches of its own up to date (the
+    /// NNUE's refresh cache), so each searcher owns its evaluator.
     fn update(
-        &self,
+        &mut self,
         parent: &Self::State,
         child: &mut Self::State,
         after: &Chess,
