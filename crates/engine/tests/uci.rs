@@ -44,6 +44,25 @@ fn handshake() {
     assert!(id < ok && ok < ready);
     assert!(out.contains("option name RandomMover type check default false"));
     assert!(out.contains("option name Hash type spin default 16 min 1 max 1024"));
+    assert!(out.contains("option name Threads type spin default 1 min 1 max 64"));
+}
+
+#[test]
+fn searches_with_several_threads() {
+    let out = session("setoption name Threads value 4\nposition startpos\ngo depth 6\n");
+    assert!(!out.contains("info string Threads"), "{out}");
+    assert!(out.contains("info depth 6 "), "{out}");
+    assert!(is_legal(&Chess::default(), bestmove(&out)));
+}
+
+#[test]
+fn threads_that_are_not_a_number_are_reported() {
+    let out = session("setoption name Threads value many\nposition startpos\ngo depth 1\n");
+    assert!(
+        out.contains("info string Threads: not a number: many"),
+        "{out}"
+    );
+    assert!(is_legal(&Chess::default(), bestmove(&out)));
 }
 
 #[test]

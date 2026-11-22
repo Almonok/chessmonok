@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use eval::MaterialEval;
 use search::{
     Limits, MATE, SearchResult, SearchStatistics, Searcher, TimeLimits, TranspositionTable,
-    position_key, time_limits,
+    position_key, search_in_parallel, time_limits,
 };
 use shakmaty::fen::Fen;
 use shakmaty::uci::UciMove;
@@ -516,4 +516,66 @@ fn a_stopped_search_still_returns_a_legal_move() {
     let position = pos(QUIET_MIDDLEGAME);
     let result = Searcher::new(MaterialEval).search(&position, &limits, &AtomicBool::new(false));
     assert!(position.legal_moves().contains(&result.best_move.unwrap()));
+}
+
+fn search_with_threads(fen: &str, limits: &Limits, threads: usize) -> SearchResult {
+    search_in_parallel(
+        MaterialEval,
+        &Arc::new(TranspositionTable::new(16)),
+        threads,
+        &pos(fen),
+        &[],
+        limits,
+        &AtomicBool::new(false),
+        |_| {},
+    )
+}
+
+#[test]
+fn one_thread_searches_exactly_like_the_single_threaded_search() {
+    let limits = Limits {
+        depth: Some(6),
+        ..Limits::default()
+    };
+    let parallel = search_with_threads(KIWIPETE, &limits, 1);
+    let single = run_with_table(&Arc::new(TranspositionTable::new(16)), KIWIPETE, 6);
+    assert_eq!(parallel.nodes, single.nodes);
+    assert_eq!(parallel.best_move, single.best_move);
+    assert_eq!(parallel.score, single.score);
+}
+
+#[test]
+fn four_threads_still_find_the_mate_and_count_every_node() {
+    let limits = Limits {
+        depth: Some(5),
+        ..Limits::default()
+    };
+    let mate_in_one = "6k1/5ppp/8/8/8/8/8/R5K1 w - - 0 1";
+    let alone = search_with_threads(mate_in_one, &limits, 1);
+    let together = search_with_threads(mate_in_one, &limits, 4);
+    assert_eq!(uci(together.best_move.unwrap()), "a1a8");
+    assert_eq!(together.score, MATE - 1);
+    // The helpers' nodes are added to the main thread's.
+    assert!(
+        together.nodes >= alone.nodes,
+        "{} < {}",
+        together.nodes,
+        alone.nodes
+    );
+}
+
+#[test]
+fn helpers_stop_when_the_main_thread_runs_out_of_time() {
+    let limits = Limits {
+        movetime: Some(Duration::from_millis(100)),
+        ..Limits::default()
+    };
+    let start = Instant::now();
+    let result = search_with_threads(KIWIPETE, &limits, 4);
+    assert!(start.elapsed() < Duration::from_millis(600));
+    assert!(
+        pos(KIWIPETE)
+            .legal_moves()
+            .contains(&result.best_move.unwrap())
+    );
 }

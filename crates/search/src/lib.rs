@@ -1,7 +1,8 @@
 //! Alpha-beta search for chessmonok.
 //!
 //! Iterative deepening runs a negamax alpha-beta search to depth 1, 2, 3...
-//! until the depth limit or the time limits (`time_management`), with a capture-only quiescence search at
+//! until the depth limit or the time limits (`time_management`), on one
+//! thread or several sharing the transposition table (`parallel`), with a capture-only quiescence search at
 //! the leaves. From depth 4 each iteration starts in a narrow window around
 //! the previous score (`aspiration`). A transposition table (`transposition`), shared across
 //! searches, remembers each node's result: it orders the remembered best move
@@ -29,6 +30,7 @@ mod history;
 mod killers;
 mod null_move;
 mod ordering;
+mod parallel;
 mod position_key;
 mod quiet_pruning;
 mod reductions;
@@ -50,6 +52,7 @@ use history::History;
 use killers::Killers;
 use shakmaty::{Chess, Color, Move, MoveList, Position};
 
+pub use parallel::{MAX_THREADS, search_in_parallel};
 pub use position_key::{key_after, position_key};
 pub use statistics::SearchStatistics;
 pub use time_management::{TimeLimits, time_limits};
@@ -178,6 +181,23 @@ impl<E: Evaluator> Searcher<E> {
         game_keys: &[u64],
         limits: &Limits,
         stop: &AtomicBool,
+        on_depth: impl FnMut(&SearchResult),
+    ) -> SearchResult {
+        self.table.new_search();
+        self.deepen(pos, game_keys, limits, stop, on_depth)
+    }
+
+    /// Iterative deepening on `pos`, writing into the table's current
+    /// generation: `search_with` without starting a new one. Several
+    /// searchers of one `go` share a generation (`parallel`): if each started
+    /// its own, the entries of the first would look a search old to the
+    /// table as soon as the next began, and be evicted first.
+    pub(crate) fn deepen(
+        &mut self,
+        pos: &Chess,
+        game_keys: &[u64],
+        limits: &Limits,
+        stop: &AtomicBool,
         mut on_depth: impl FnMut(&SearchResult),
     ) -> SearchResult {
         let start = Instant::now();
@@ -194,7 +214,6 @@ impl<E: Evaluator> Searcher<E> {
         self.pv = vec![Vec::new(); MAX_PLY + 1];
         self.killers = Killers::new();
         self.history = History::new();
-        self.table.new_search();
         let mut best = SearchResult {
             best_move: None,
             score: 0,
