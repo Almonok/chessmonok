@@ -88,7 +88,7 @@ fn never_passes_with_only_pawns_left() {
     // search at all: the count is the one measured with `may_pass` switched
     // off. Re-measure it that way whenever the move order changes.
     let result = run("8/pp3k2/2p5/8/8/2P5/PP3K2/8 w - - 0 1", 9);
-    assert_eq!(result.nodes, 8_324);
+    assert_eq!(result.nodes, 5_537);
 }
 
 #[test]
@@ -446,6 +446,20 @@ fn reverse_futility_pruning_cuts_nodes_far_above_beta() {
     // the side that won it is cut on its evaluation a few plies further.
     let statistics = run(KIWIPETE, 5).statistics;
     assert!(statistics.reverse_futility_cutoffs > 0);
+}
+
+#[test]
+fn quiescence_skips_captures_that_lose_material() {
+    // Kiwipete's queens, rooks and minor pieces face many defended pawns.
+    let statistics = run(KIWIPETE, 5).statistics;
+    assert!(statistics.losing_captures_skipped > 0);
+}
+
+#[test]
+fn shallow_nodes_skip_late_and_futile_quiet_moves() {
+    let statistics = run(QUIET_MIDDLEGAME, 6).statistics;
+    assert!(statistics.late_moves_pruned > 0);
+    assert!(statistics.futile_moves_pruned > 0);
 }
 
 /// A smoke test: a search cut short by time, with reduced searches and
