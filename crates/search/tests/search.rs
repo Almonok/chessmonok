@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use eval::MaterialEval;
 use search::{
-    Limits, MATE, SearchResult, SearchStatistics, Searcher, TranspositionTable, position_key,
-    time_budget,
+    Limits, MATE, SearchResult, SearchStatistics, Searcher, TimeLimits, TranspositionTable,
+    position_key, time_limits,
 };
 use shakmaty::fen::Fen;
 use shakmaty::uci::UciMove;
@@ -197,40 +197,81 @@ fn secs(s: f64) -> Duration {
 }
 
 #[test]
-fn budget_uses_movetime_first() {
+fn movetime_is_both_limits() {
     let limits = Limits {
         movetime: Some(secs(0.25)),
         wtime: Some(secs(60.0)),
         ..Limits::default()
     };
-    assert_eq!(time_budget(&limits, Color::White), Some(secs(0.25)));
+    assert_eq!(
+        time_limits(&limits, Color::White),
+        Some(TimeLimits {
+            soft: secs(0.25),
+            hard: secs(0.25)
+        })
+    );
 }
 
 #[test]
-fn budget_is_a_thirtieth_plus_half_the_increment() {
+fn the_limits_scale_a_thirtieth_of_the_clock_plus_half_the_increment() {
+    // White's target: 60 / 30 + 1 / 2 = 2.5 s; Black's: 30 / 30 = 1 s.
     let limits = Limits {
         wtime: Some(secs(60.0)),
         winc: Some(secs(1.0)),
         btime: Some(secs(30.0)),
         ..Limits::default()
     };
-    assert_eq!(time_budget(&limits, Color::White), Some(secs(2.5)));
-    assert_eq!(time_budget(&limits, Color::Black), Some(secs(1.0)));
+    assert_eq!(
+        time_limits(&limits, Color::White),
+        Some(TimeLimits {
+            soft: secs(1.75),
+            hard: secs(6.25)
+        })
+    );
+    assert_eq!(
+        time_limits(&limits, Color::Black),
+        Some(TimeLimits {
+            soft: secs(0.7),
+            hard: secs(2.5)
+        })
+    );
 }
 
 #[test]
-fn budget_never_exceeds_a_quarter_of_the_clock() {
+fn no_limit_exceeds_a_quarter_of_the_clock() {
     let limits = Limits {
         wtime: Some(secs(2.0)),
         winc: Some(secs(10.0)),
         ..Limits::default()
     };
-    assert_eq!(time_budget(&limits, Color::White), Some(secs(0.5)));
+    assert_eq!(
+        time_limits(&limits, Color::White),
+        Some(TimeLimits {
+            soft: secs(0.5),
+            hard: secs(0.5)
+        })
+    );
 }
 
 #[test]
-fn budget_is_none_without_a_clock() {
-    assert_eq!(time_budget(&Limits::default(), Color::White), None);
+fn there_are_no_limits_without_a_clock() {
+    assert_eq!(time_limits(&Limits::default(), Color::White), None);
+}
+
+#[test]
+fn a_clock_search_ends_within_its_hard_limit() {
+    let limits = Limits {
+        wtime: Some(secs(3.0)),
+        btime: Some(secs(3.0)),
+        ..Limits::default()
+    };
+    let hard = time_limits(&limits, Color::White).unwrap().hard;
+    let start = Instant::now();
+    let result =
+        Searcher::new(MaterialEval).search(&Chess::default(), &limits, &AtomicBool::new(false));
+    // Slack for the node-count gap between deadline checks and a busy machine.
+    assert!(start.elapsed() < hard + Duration::from_millis(500));
+    assert!(result.depth >= 1);
 }
 
 #[test]
