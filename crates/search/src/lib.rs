@@ -19,10 +19,12 @@
 //! same ply (`killers`), then the other quiet moves by how often they caused
 //! cutoffs so far (`history`), and last the captures that static exchange
 //! evaluation (`see`) shows losing material; quiescence skips those
-//! altogether. `statistics` counts how often the first move tried was the
-//! one that cut, the quick measure of that order.
+//! altogether, and generates only captures (`captures`). `statistics`
+//! counts how often the first move tried was the one that cut, the quick
+//! measure of that order.
 
 mod aspiration;
+mod captures;
 mod history;
 mod killers;
 mod null_move;
@@ -475,7 +477,7 @@ impl<E: Evaluator> Searcher<E> {
         let mut moves = if in_check {
             pos.legal_moves()
         } else {
-            pos.capture_moves()
+            captures::capture_moves(pos)
         };
         if in_check && moves.is_empty() {
             return mated(ply);
