@@ -31,11 +31,26 @@
 //! an upper bound at or below the new alpha, a lower bound at or above the new
 //! beta, or an exact score.
 //!
-//! # Layout: a big array of 16-byte slots
+//! # Layout: buckets of four 16-byte slots
 //!
-//! The table is one fixed-size array (the UCI `Hash` option, in MB), indexed
-//! by the position's 64-bit Zobrist key (see `position_key`). Each slot holds
-//! one entry, packed into one `u64` of data:
+//! The table is one fixed-size array (the UCI `Hash` option, in MB) of
+//! buckets, indexed by the position's 64-bit Zobrist key (see
+//! `position_key`). A bucket is four slots, 64 bytes aligned on 64 bytes:
+//!
+//! ```text
+//!   bucket = | slot | slot | slot | slot |   64 bytes, one cache line
+//! ```
+//!
+//! Every lookup is a memory access far from anything recently used, which
+//! costs about as much as hundreds of instructions. Reading one slot or four
+//! from the same cache line costs the same single access, so a position may
+//! live in any of its bucket's four slots: a lookup checks all four, and a
+//! store chooses which to overwrite (see `store`). With one slot per
+//! position, two positions whose keys land on the same slot evicted each
+//! other at once; now four can share an address before anything is lost,
+//! and what is lost is the least valuable of them.
+//!
+//! Each slot holds one entry, packed into one `u64` of data:
 //!
 //! ```text
 //!  bits  0..16   best move (PackedMove; 0 = none)
@@ -46,8 +61,8 @@
 //! ```
 //!
 //! and a second `u64` that is the key XOR the data. The full key is kept so
-//! that two positions sharing a slot are told apart; a wrong match would hand
-//! the search the score of a different position.
+//! that two positions sharing a bucket are told apart; a wrong match would
+//! hand the search the score of a different position.
 //!
 //! # Lock-free from the start
 //!
@@ -77,6 +92,17 @@ pub const MAX_HASH_MEGABYTES: usize = 1024;
 /// How many slots `hashfull` looks at: enough to estimate the fill to a few
 /// per mille, few enough to cost nothing once per iteration.
 const HASHFULL_SAMPLE: usize = 1000;
+
+/// Slots per bucket: four 16-byte slots fill a 64-byte cache line.
+const SLOTS_PER_BUCKET: usize = 4;
+
+/// When a bucket is full, the entry evicted is the one with the least
+/// `depth - AGE_PENALTY_PLIES x age`, where age counts the searches since it
+/// was written. An entry from the previous move must be 8 plies deeper than
+/// a current one to outlive it: deep results stay useful a move or two
+/// later (most of the next move's tree was searched during this one), but
+/// not forever.
+const AGE_PENALTY_PLIES: i32 = 8;
 
 /// A move in 16 bits: origin square, target square, promotion.
 ///
@@ -203,10 +229,23 @@ impl Slot {
     }
 }
 
+/// Four slots read with one memory access.
+///
+/// `#[repr(align(64))]` makes the compiler place every bucket at an address
+/// that is a multiple of 64, and pad it to 64 bytes: a bucket then never
+/// straddles two cache lines (on x86-64 they are 64 bytes; on Apple's ARM
+/// cores 128, which 64 divides). Without it a `[Slot; 4]` is only 8-byte
+/// aligned, and every other bucket would cost two memory accesses.
+#[repr(align(64))]
+#[derive(Default)]
+struct Bucket {
+    slots: [Slot; SLOTS_PER_BUCKET],
+}
+
 /// A fixed-size table shared by reference: every method takes `&self`, so
 /// threads can later share one table through an `Arc` with no lock.
 pub struct TranspositionTable {
-    slots: Box<[Slot]>,
+    buckets: Box<[Bucket]>,
     /// Bumped by every search, so entries left by earlier searches can be
     /// told apart and overwritten first. It wraps after 256 searches; an
     /// entry that old is then mistaken for a fresh one, which costs at worst
@@ -218,30 +257,34 @@ impl fmt::Debug for TranspositionTable {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("TranspositionTable")
-            .field("slots", &self.slots.len())
+            .field("buckets", &self.buckets.len())
             .field("generation", &self.generation)
             .finish()
     }
 }
 
 impl TranspositionTable {
-    /// A table of `megabytes` MB (at least one slot), all slots empty.
+    /// A table of `megabytes` MB (at least one bucket), all slots empty.
     pub fn new(megabytes: usize) -> Self {
-        let slot_count = (megabytes * 1024 * 1024 / size_of::<Slot>()).max(1);
+        let bucket_count = (megabytes * 1024 * 1024 / size_of::<Bucket>()).max(1);
         Self {
-            slots: (0..slot_count).map(|_| Slot::default()).collect(),
+            buckets: (0..bucket_count).map(|_| Bucket::default()).collect(),
             generation: AtomicU8::new(0),
         }
     }
 
     pub fn slot_count(&self) -> usize {
-        self.slots.len()
+        self.buckets.len() * SLOTS_PER_BUCKET
+    }
+
+    fn slots(&self) -> impl Iterator<Item = &Slot> {
+        self.buckets.iter().flat_map(|bucket| &bucket.slots)
     }
 
     /// Empty every slot: `ucinewgame`, so one game's analysis cannot steer
     /// the next (and test results do not depend on what ran before).
     pub fn clear(&self) {
-        for slot in &self.slots {
+        for slot in self.slots() {
             slot.save(0, 0);
         }
     }
@@ -252,38 +295,54 @@ impl TranspositionTable {
         self.generation.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// What the table knows about the position with this key, if anything.
+    /// What the table knows about the position with this key, if anything:
+    /// any slot of its bucket may hold it.
     pub fn probe(&self, key: u64) -> Option<TableEntry> {
-        let (stored_key, data) = self.slot(key).load();
-        if stored_key != key {
-            return None;
-        }
-        TableEntry::unpack(data).map(|(entry, _generation)| entry)
+        self.bucket(key).slots.iter().find_map(|slot| {
+            let (stored_key, data) = slot.load();
+            if stored_key != key {
+                return None;
+            }
+            TableEntry::unpack(data).map(|(entry, _generation)| entry)
+        })
     }
 
-    /// Remember `entry` for the position with this key, unless the slot holds
-    /// something more valuable.
+    /// Remember `entry` for the position with this key.
     ///
-    /// The replacement rule: an entry from an earlier search always gives
-    /// way; within the same search, the deeper entry stays, because it cost
-    /// more nodes to produce and its score can answer more future probes (a
-    /// depth-8 result can cut a depth-5 search, not the other way round).
+    /// If the bucket already holds this position, that slot is updated, but
+    /// a deeper result from the same search stays: it cost more nodes to
+    /// produce and its score can answer more future probes (a depth-8 result
+    /// can cut a depth-5 search, not the other way round). Otherwise the new
+    /// entry takes the bucket's least valuable slot: an empty one, else the
+    /// one with the least depth once age is counted (`AGE_PENALTY_PLIES`).
     pub fn store(&self, key: u64, entry: TableEntry) {
-        let slot = self.slot(key);
+        let bucket = self.bucket(key);
         let generation = self.generation.load(Ordering::Relaxed);
-        let (stored_key, stored_data) = slot.load();
         let mut entry = entry;
-        if let Some((stored, stored_generation)) = TableEntry::unpack(stored_data) {
-            if stored_generation == generation && entry.depth < stored.depth {
-                return;
+        for slot in &bucket.slots {
+            let (stored_key, stored_data) = slot.load();
+            if stored_key != key {
+                continue;
             }
-            // A fail-low finds no best move. If this same position had one,
-            // it is still the best guess of what to try first.
-            if stored_key == key && entry.best_move.is_none() {
-                entry.best_move = stored.best_move;
+            if let Some((stored, stored_generation)) = TableEntry::unpack(stored_data) {
+                if stored_generation == generation && entry.depth < stored.depth {
+                    return;
+                }
+                // A fail-low finds no best move. If this same position had
+                // one, it is still the best guess of what to try first.
+                if entry.best_move.is_none() {
+                    entry.best_move = stored.best_move;
+                }
             }
+            slot.save(key, entry.pack(generation));
+            return;
         }
-        slot.save(key, entry.pack(generation));
+        let least_valuable = bucket
+            .slots
+            .iter()
+            .min_by_key(|slot| worth(slot, generation))
+            .expect("a bucket has slots");
+        least_valuable.save(key, entry.pack(generation));
     }
 
     /// How full the table is with entries from the current search, in per
@@ -291,28 +350,41 @@ impl TranspositionTable {
     /// slots: keys are spread uniformly, so they are a fair sample.
     pub fn hashfull(&self) -> u32 {
         let generation = self.generation.load(Ordering::Relaxed);
-        let sample = &self.slots[..self.slots.len().min(HASHFULL_SAMPLE)];
-        let current = sample
-            .iter()
+        let sample_size = self.slot_count().min(HASHFULL_SAMPLE);
+        let current = self
+            .slots()
+            .take(sample_size)
             .filter(|slot| {
                 let (_key, data) = slot.load();
                 TableEntry::unpack(data).is_some_and(|(_entry, written)| written == generation)
             })
             .count();
-        (current * 1000 / sample.len()) as u32
+        (current * 1000 / sample_size) as u32
     }
 
-    /// The slot for `key`.
+    /// The bucket for `key`.
     ///
-    /// `key * slot_count / 2^64` maps a uniform 64-bit key to a uniform index
-    /// in `0..slot_count` with one multiplication (Lemire's "fast range"),
-    /// where `key % slot_count` would need a division, several times slower.
-    /// It also frees the table from power-of-two sizes, so `Hash` can be any
-    /// number of MB.
-    fn slot(&self, key: u64) -> &Slot {
-        let index = (u128::from(key) * self.slots.len() as u128) >> 64;
-        &self.slots[index as usize]
+    /// `key * bucket_count / 2^64` maps a uniform 64-bit key to a uniform
+    /// index in `0..bucket_count` with one multiplication (Lemire's "fast
+    /// range"), where `key % bucket_count` would need a division, several
+    /// times slower. It also frees the table from power-of-two sizes, so
+    /// `Hash` can be any number of MB.
+    fn bucket(&self, key: u64) -> &Bucket {
+        let index = (u128::from(key) * self.buckets.len() as u128) >> 64;
+        &self.buckets[index as usize]
     }
+}
+
+/// How much a slot is worth keeping: its depth, less `AGE_PENALTY_PLIES`
+/// per search since it was written. An empty slot is worth nothing.
+fn worth(slot: &Slot, generation: u8) -> i32 {
+    let (_key, data) = slot.load();
+    TableEntry::unpack(data).map_or(i32::MIN, |(entry, written)| {
+        // Wrapping: the generation counter wraps after 256 searches, and the
+        // age is still right as long as no entry survives 256 searches.
+        let age = i32::from(generation.wrapping_sub(written));
+        i32::try_from(entry.depth).unwrap_or(i32::MAX) - AGE_PENALTY_PLIES * age
+    })
 }
 
 /// A score as the table stores it: mate distances counted from `ply`, the
@@ -396,14 +468,61 @@ mod tests {
         assert_eq!(table.probe(KEY), None);
     }
 
+    /// Keys differing only in their lowest bits: the high bits, which pick
+    /// the bucket, are the same, so all of them share `KEY`'s bucket.
+    fn neighbours(count: u64) -> Vec<u64> {
+        (1..=count).map(|low_bits| KEY ^ low_bits).collect()
+    }
+
     #[test]
-    fn another_position_in_the_same_slot_is_a_miss() {
+    fn another_position_in_the_same_bucket_is_a_miss() {
         let table = TranspositionTable::new(1);
-        // Flipping the lowest bit leaves the high bits, hence the slot, alone.
-        let neighbour = KEY ^ 1;
-        assert!(std::ptr::eq(table.slot(KEY), table.slot(neighbour)));
+        let neighbour = neighbours(1)[0];
+        assert!(std::ptr::eq(table.bucket(KEY), table.bucket(neighbour)));
         table.store(KEY, entry(3, 50, Bound::Exact));
         assert_eq!(table.probe(neighbour), None);
+    }
+
+    #[test]
+    fn four_positions_share_a_bucket() {
+        let table = TranspositionTable::new(1);
+        let keys = neighbours(4);
+        for (depth, &key) in (1..).zip(&keys) {
+            table.store(key, entry(depth, 0, Bound::Exact));
+        }
+        for (depth, &key) in (1..).zip(&keys) {
+            assert_eq!(table.probe(key).map(|found| found.depth), Some(depth));
+        }
+    }
+
+    #[test]
+    fn a_full_bucket_evicts_its_shallowest_entry() {
+        let table = TranspositionTable::new(1);
+        let keys = neighbours(5);
+        for (&key, depth) in keys.iter().zip([5, 2, 7, 9]) {
+            table.store(key, entry(depth, 0, Bound::Exact));
+        }
+        table.store(keys[4], entry(1, 0, Bound::Exact));
+        assert_eq!(table.probe(keys[1]), None, "depth 2 was the least valuable");
+        for kept in [keys[0], keys[2], keys[3], keys[4]] {
+            assert!(table.probe(kept).is_some());
+        }
+    }
+
+    #[test]
+    fn an_old_entry_gives_way_unless_much_deeper() {
+        let table = TranspositionTable::new(1);
+        let keys = neighbours(5);
+        // Depth 10 from the previous search is worth 10 - 8 = 2 now: less
+        // than the current depth-4 entries, more than nothing.
+        table.store(keys[0], entry(10, 0, Bound::Exact));
+        table.new_search();
+        for &key in &keys[1..4] {
+            table.store(key, entry(4, 0, Bound::Exact));
+        }
+        table.store(keys[4], entry(1, 0, Bound::Exact));
+        assert_eq!(table.probe(keys[0]), None);
+        assert!(keys[1..].iter().all(|&key| table.probe(key).is_some()));
     }
 
     #[test]
@@ -413,7 +532,7 @@ mod tests {
         let table = TranspositionTable::new(1);
         let first = entry(3, 50, Bound::Exact).pack(0);
         let second = entry(7, -80, Bound::Upper).pack(0);
-        let slot = table.slot(KEY);
+        let slot = &table.bucket(KEY).slots[0];
         slot.key_xor_data.store(KEY ^ first, Ordering::Relaxed);
         slot.data.store(second, Ordering::Relaxed);
         assert_eq!(table.probe(KEY), None);
@@ -463,6 +582,8 @@ mod tests {
     #[test]
     fn the_size_follows_the_megabytes() {
         assert_eq!(size_of::<Slot>(), 16);
+        assert_eq!(size_of::<Bucket>(), 64);
+        assert_eq!(align_of::<Bucket>(), 64);
         assert_eq!(TranspositionTable::new(1).slot_count(), 65_536);
         assert_eq!(TranspositionTable::new(16).slot_count(), 1_048_576);
     }
@@ -471,10 +592,14 @@ mod tests {
     fn hashfull_counts_only_the_current_search() {
         let table = TranspositionTable::new(1);
         assert_eq!(table.hashfull(), 0);
-        // Keys k * 2^64 / slots land in slot k: fill the whole sample.
-        let step = u64::MAX / table.slot_count() as u64 + 1;
-        for index in 0..HASHFULL_SAMPLE as u64 {
-            table.store(index * step, entry(1, 0, Bound::Exact));
+        // Keys k * 2^64 / buckets (plus a few) land in bucket k: fill the
+        // buckets of the whole sample, four keys each.
+        let step = u64::MAX / table.buckets.len() as u64 + 1;
+        let sampled_buckets = (HASHFULL_SAMPLE / SLOTS_PER_BUCKET) as u64;
+        for index in 0..sampled_buckets {
+            for low_bits in 0..SLOTS_PER_BUCKET as u64 {
+                table.store(index * step + low_bits, entry(1, 0, Bound::Exact));
+            }
         }
         assert_eq!(table.hashfull(), 1000);
         table.new_search();
