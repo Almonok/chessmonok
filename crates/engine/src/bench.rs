@@ -10,12 +10,19 @@
 //! A third number, the **first-move cutoff rate** (see
 //! `search::SearchStatistics`), measures move ordering: a change meant to
 //! order moves better must raise it.
+//!
+//! Each position is searched with a fresh transposition table of the
+//! session's `Hash` size. At the default size, bench's searches barely fill
+//! it; `setoption name Hash value 1` before `bench` puts the table under the
+//! pressure of a long game, which is where a change to how it keeps entries
+//! shows (in its hit rate, and in the node total).
 
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use eval::{Evaluator, MaterialEval};
-use search::{Limits, SearchStatistics, Searcher};
+use search::{Limits, SearchStatistics, Searcher, TranspositionTable};
 use shakmaty::fen::Fen;
 use shakmaty::{CastlingMode, Chess};
 
@@ -59,16 +66,27 @@ impl BenchResult {
 
 /// Search every bench position to `depth` with `evaluation`; `None` when the
 /// evaluation is broken.
-pub fn run_bench(evaluation: &Evaluation, depth: u32) -> Option<BenchResult> {
-    run_bench_on(evaluation, depth, &POSITIONS)
+pub fn run_bench(
+    evaluation: &Evaluation,
+    depth: u32,
+    hash_megabytes: usize,
+) -> Option<BenchResult> {
+    run_bench_on(evaluation, depth, hash_megabytes, &POSITIONS)
 }
 
 /// The same as [`run_bench`], on the given positions (FENs).
-fn run_bench_on(evaluation: &Evaluation, depth: u32, positions: &[&str]) -> Option<BenchResult> {
+fn run_bench_on(
+    evaluation: &Evaluation,
+    depth: u32,
+    hash_megabytes: usize,
+    positions: &[&str],
+) -> Option<BenchResult> {
     let started = Instant::now();
     let (nodes, statistics) = match evaluation {
-        Evaluation::Material => search_all(&MaterialEval, depth, positions),
-        Evaluation::Nnue { evaluator, .. } => search_all(evaluator, depth, positions),
+        Evaluation::Material => search_all(&MaterialEval, depth, hash_megabytes, positions),
+        Evaluation::Nnue { evaluator, .. } => {
+            search_all(evaluator, depth, hash_megabytes, positions)
+        }
         Evaluation::Broken { .. } => return None,
     };
     Some(BenchResult {
@@ -84,6 +102,7 @@ fn run_bench_on(evaluation: &Evaluation, depth: u32, positions: &[&str]) -> Opti
 fn search_all<E: Evaluator + Clone>(
     evaluator: &E,
     depth: u32,
+    hash_megabytes: usize,
     positions: &[&str],
 ) -> (u64, SearchStatistics) {
     let limits = Limits {
@@ -94,7 +113,12 @@ fn search_all<E: Evaluator + Clone>(
     positions
         .iter()
         .map(|fen| {
-            Searcher::new(evaluator.clone()).search(&bench_position(fen), &limits, &never_stop)
+            let table = Arc::new(TranspositionTable::new(hash_megabytes));
+            Searcher::with_table(evaluator.clone(), table).search(
+                &bench_position(fen),
+                &limits,
+                &never_stop,
+            )
         })
         .fold(
             (0, SearchStatistics::default()),
@@ -112,7 +136,7 @@ fn bench_position(fen: &str) -> Chess {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use search::DEFAULT_HASH_MEGABYTES;
 
     use nnue::{Network, Nnue};
 
@@ -128,8 +152,14 @@ mod tests {
             evaluator: Nnue::new(Arc::new(Network::random(5))),
             file: "random".to_string(),
         };
-        let with_net = run_bench_on(&net, 3, &KING_AND_PAWN).unwrap();
-        let with_material = run_bench_on(&Evaluation::Material, 3, &KING_AND_PAWN).unwrap();
+        let with_net = run_bench_on(&net, 3, DEFAULT_HASH_MEGABYTES, &KING_AND_PAWN).unwrap();
+        let with_material = run_bench_on(
+            &Evaluation::Material,
+            3,
+            DEFAULT_HASH_MEGABYTES,
+            &KING_AND_PAWN,
+        )
+        .unwrap();
         assert_ne!(with_net.nodes, with_material.nodes);
     }
 
@@ -138,6 +168,6 @@ mod tests {
         let broken = Evaluation::Broken {
             reason: "missing".to_string(),
         };
-        assert!(run_bench_on(&broken, 3, &KING_AND_PAWN).is_none());
+        assert!(run_bench_on(&broken, 3, DEFAULT_HASH_MEGABYTES, &KING_AND_PAWN).is_none());
     }
 }

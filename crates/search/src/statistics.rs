@@ -33,6 +33,12 @@
 //! Aspiration windows bet that an iteration scores close to the last one;
 //! each re-search of the root is a lost bet. Quiet-move pruning skips moves
 //! unsearched, counted by the rule that skipped them.
+//!
+//! The transposition table is measured by what its probes return: the share
+//! that found the position (a hit: at least its best move to try first),
+//! and among all probes the share that ended the node outright (a table
+//! cutoff). Both fall when the table is too small for the search and
+//! entries are overwritten before they are needed again.
 
 use std::ops::Add;
 
@@ -65,6 +71,12 @@ pub struct SearchStatistics {
     pub late_moves_pruned: u64,
     /// Quiet moves skipped because they could not lift the node to alpha.
     pub futile_moves_pruned: u64,
+    /// Main-search nodes that looked their position up in the table.
+    pub table_probes: u64,
+    /// Those of them that found it.
+    pub table_hits: u64,
+    /// Those of them whose stored result ended the node.
+    pub table_cutoffs: u64,
 }
 
 impl SearchStatistics {
@@ -85,6 +97,17 @@ impl SearchStatistics {
 
     pub(crate) fn record_losing_capture_skipped(&mut self) {
         self.losing_captures_skipped += 1;
+    }
+
+    pub(crate) fn record_table_probe(&mut self, found: bool) {
+        self.table_probes += 1;
+        if found {
+            self.table_hits += 1;
+        }
+    }
+
+    pub(crate) fn record_table_cutoff(&mut self) {
+        self.table_cutoffs += 1;
     }
 
     pub(crate) fn record_cutoff(&mut self, on_first_move: bool) {
@@ -112,6 +135,16 @@ impl SearchStatistics {
     /// there was no cutoff at all.
     pub fn first_move_cutoff_rate(&self) -> f64 {
         share(self.first_move_cutoffs, self.cutoffs)
+    }
+
+    /// The share of table probes that found their position, from 0 to 1.
+    pub fn table_hit_rate(&self) -> f64 {
+        share(self.table_hits, self.table_probes)
+    }
+
+    /// The share of table probes that ended their node, from 0 to 1.
+    pub fn table_cutoff_rate(&self) -> f64 {
+        share(self.table_cutoffs, self.table_probes)
     }
 
     /// The share of zero-window searches searched again, from 0 to 1.
@@ -144,6 +177,9 @@ impl Add for SearchStatistics {
             aspiration_re_searches: self.aspiration_re_searches + other.aspiration_re_searches,
             late_moves_pruned: self.late_moves_pruned + other.late_moves_pruned,
             futile_moves_pruned: self.futile_moves_pruned + other.futile_moves_pruned,
+            table_probes: self.table_probes + other.table_probes,
+            table_hits: self.table_hits + other.table_hits,
+            table_cutoffs: self.table_cutoffs + other.table_cutoffs,
         }
     }
 }
