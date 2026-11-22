@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 
 use eval::dirty_pieces;
 use nnue::features::active_features;
-use nnue::{Accumulator, L1, Network};
+use nnue::{Accumulator, L1, Network, RefreshCache};
 use shakmaty::fen::Fen;
 use shakmaty::uci::UciMove;
 use shakmaty::{CastlingMode, Chess, Color, Move, Position};
@@ -22,7 +22,15 @@ fn pos(fen: &str) -> Chess {
         .unwrap()
 }
 
-fn assert_update_matches_refresh(before: &Chess, m: Move, context: &str) {
+/// `refresh_cache` is shared by the calls of one game, as in a search: its
+/// entries are left over from earlier positions, and a king move must still
+/// rebuild the exact half from them.
+fn assert_update_matches_refresh(
+    before: &Chess,
+    m: Move,
+    refresh_cache: &mut RefreshCache,
+    context: &str,
+) {
     let net = net();
     let parent = Accumulator::refresh(net, before);
     let dirty = dirty_pieces(before, m);
@@ -34,7 +42,7 @@ fn assert_update_matches_refresh(before: &Chess, m: Move, context: &str) {
         white: [1234; L1],
         black: [-1234; L1],
     };
-    parent.update(net, &after, &dirty, &mut updated);
+    parent.update(net, &after, &dirty, &mut updated, refresh_cache);
     assert_eq!(
         updated,
         Accumulator::refresh(net, &after),
@@ -112,7 +120,7 @@ fn every_kind_of_move_updates_exactly() {
     for (name, fen, uci) in cases {
         let before = pos(fen);
         let m = uci.parse::<UciMove>().unwrap().to_move(&before).unwrap();
-        assert_update_matches_refresh(&before, m, name);
+        assert_update_matches_refresh(&before, m, &mut RefreshCache::new(net()), name);
     }
 }
 
@@ -132,13 +140,19 @@ fn update_matches_refresh_over_random_games() {
     for seed in 1..=100u64 {
         let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
         let mut p = Chess::default();
+        let mut refresh_cache = RefreshCache::new(net());
         for ply in 0..300 {
             let moves = p.legal_moves();
             if moves.is_empty() {
                 break;
             }
             let m = moves[usize::try_from(rng.next() % moves.len() as u64).unwrap()];
-            assert_update_matches_refresh(&p, m, &format!("seed {seed}, ply {ply}"));
+            assert_update_matches_refresh(
+                &p,
+                m,
+                &mut refresh_cache,
+                &format!("seed {seed}, ply {ply}"),
+            );
             p.play_unchecked(m);
         }
     }

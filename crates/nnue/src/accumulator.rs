@@ -12,6 +12,7 @@ use eval::DirtyPieces;
 use shakmaty::{Board, Chess, Color, Position, Role, Square};
 
 use crate::features::{active_features, feature_index};
+use crate::refresh_cache::RefreshCache;
 use crate::{L1, Network};
 
 /// The feature transformer's output for both perspectives: `ft_bias` plus the
@@ -75,12 +76,19 @@ impl Accumulator {
         after: &Chess,
         dirty: &DirtyPieces,
         child: &mut Accumulator,
+        refresh_cache: &mut RefreshCache,
     ) {
         for perspective in [Color::White, Color::Black] {
             if own_king_moved(dirty, perspective) {
                 // Every feature of this side depends on its own king's
-                // square, so all of them change: start again from scratch.
-                child.refresh_half(net, after.board(), perspective);
+                // square, so all of them change: rebuild the half, from the
+                // last one computed with the king on this square.
+                refresh_cache.refresh_half(
+                    net,
+                    after.board(),
+                    perspective,
+                    child.half_mut(perspective),
+                );
             } else {
                 let king = after
                     .board()
@@ -201,7 +209,7 @@ fn move_one_piece_and_capture(
 /// Add a feature's row of weights to one half. Plain `i16` addition: the
 /// training clips every weight so that a half stays within ±8128, so an
 /// overflow (which panics in a debug build) can only mean a bug.
-fn add_row(half: &mut [i16; L1], row: &[i16; L1]) {
+pub(crate) fn add_row(half: &mut [i16; L1], row: &[i16; L1]) {
     for (value, weight) in half.iter_mut().zip(row) {
         *value += weight;
     }
@@ -213,7 +221,7 @@ fn own_king_moved(dirty: &DirtyPieces, perspective: Color) -> bool {
         .any(|moved| moved.piece.role == Role::King && moved.piece.color == perspective)
 }
 
-fn subtract_row(half: &mut [i16; L1], row: &[i16; L1]) {
+pub(crate) fn subtract_row(half: &mut [i16; L1], row: &[i16; L1]) {
     for (value, weight) in half.iter_mut().zip(row) {
         *value -= weight;
     }

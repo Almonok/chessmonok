@@ -13,7 +13,7 @@ impl Evaluator for MaterialEval {
 
     fn refresh(&self, _: &Chess) {}
 
-    fn update(&self, (): &(), (): &mut (), _: &Chess, _: &DirtyPieces) {}
+    fn update(&mut self, (): &(), (): &mut (), _: &Chess, _: &DirtyPieces) {}
 
     fn evaluate(&self, (): &(), pos: &Chess) -> i32 {
         let us = pos.turn();
