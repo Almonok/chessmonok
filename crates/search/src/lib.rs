@@ -1,7 +1,7 @@
 //! Alpha-beta search for chessmonok.
 //!
 //! Iterative deepening runs a negamax alpha-beta search to depth 1, 2, 3...
-//! until the time or depth limit, with a capture-only quiescence search at
+//! until the depth limit or the time limits (`time_management`), with a capture-only quiescence search at
 //! the leaves. From depth 4 each iteration starts in a narrow window around
 //! the previous score (`aspiration`). A transposition table (`transposition`), shared across
 //! searches, remembers each node's result: it orders the remembered best move
@@ -34,6 +34,7 @@ mod repetition;
 mod reverse_futility;
 mod see;
 mod statistics;
+mod time_management;
 mod transposition;
 
 use std::fmt;
@@ -49,6 +50,7 @@ use shakmaty::{Chess, Color, Move, MoveList, Position};
 
 pub use position_key::{key_after, position_key};
 pub use statistics::SearchStatistics;
+pub use time_management::{TimeLimits, time_limits};
 pub use transposition::{
     Bound, DEFAULT_HASH_MEGABYTES, MAX_HASH_MEGABYTES, PackedMove, TableEntry, TranspositionTable,
     score_from_table, score_to_table,
@@ -87,19 +89,6 @@ pub struct SearchResult {
     pub statistics: SearchStatistics,
 }
 
-/// `movetime`, else a thirtieth of the clock plus half the increment, capped at a quarter.
-pub fn time_budget(limits: &Limits, turn: Color) -> Option<Duration> {
-    if limits.movetime.is_some() {
-        return limits.movetime;
-    }
-    let (time, inc) = match turn {
-        Color::White => (limits.wtime, limits.winc),
-        Color::Black => (limits.btime, limits.binc),
-    };
-    let time = time?;
-    Some((time / 30 + inc.unwrap_or_default() / 2).min(time / 4))
-}
-
 pub struct Searcher<E: Evaluator> {
     eval: E,
     states: Vec<E::State>,
@@ -124,7 +113,10 @@ pub struct Searcher<E: Evaluator> {
     table: Arc<TranspositionTable>,
     nodes: u64,
     statistics: SearchStatistics,
-    deadline: Option<Instant>,
+    /// No iteration is started past this instant (`time_management`).
+    soft_deadline: Option<Instant>,
+    /// The search is aborted past this instant, even mid-iteration.
+    hard_deadline: Option<Instant>,
     can_abort: bool,
     aborted: bool,
 }
@@ -162,7 +154,8 @@ impl<E: Evaluator> Searcher<E> {
             table,
             nodes: 0,
             statistics: SearchStatistics::default(),
-            deadline: None,
+            soft_deadline: None,
+            hard_deadline: None,
             can_abort: false,
             aborted: false,
         }
@@ -185,7 +178,10 @@ impl<E: Evaluator> Searcher<E> {
         stop: &AtomicBool,
         mut on_depth: impl FnMut(&SearchResult),
     ) -> SearchResult {
-        self.deadline = time_budget(limits, pos.turn()).map(|budget| Instant::now() + budget);
+        let start = Instant::now();
+        let time_limits = time_limits(limits, pos.turn());
+        self.soft_deadline = time_limits.map(|limits| start + limits.soft);
+        self.hard_deadline = time_limits.map(|limits| start + limits.hard);
         self.nodes = 0;
         self.statistics = SearchStatistics::default();
         self.states = vec![self.eval.refresh(pos); MAX_PLY + 1];
@@ -225,7 +221,9 @@ impl<E: Evaluator> Searcher<E> {
                 statistics: self.statistics,
             };
             on_depth(&best);
-            let out_of_time = self.deadline.is_some_and(|d| Instant::now() >= d);
+            let out_of_time = self
+                .soft_deadline
+                .is_some_and(|deadline| Instant::now() >= deadline);
             if is_shortest_mate(score, depth) || out_of_time || stop.load(Ordering::Relaxed) {
                 break;
             }
@@ -695,7 +693,10 @@ impl<E: Evaluator> Searcher<E> {
     fn should_stop(&self, stop: &AtomicBool) -> bool {
         self.can_abort
             && self.nodes % 1024 == 0
-            && (stop.load(Ordering::Relaxed) || self.deadline.is_some_and(|d| Instant::now() >= d))
+            && (stop.load(Ordering::Relaxed)
+                || self
+                    .hard_deadline
+                    .is_some_and(|deadline| Instant::now() >= deadline))
     }
 }
 
