@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use eval::{Evaluator, MaterialEval};
 use search::{
-    DEFAULT_HASH_MEGABYTES, Limits, MATE, MAX_HASH_MEGABYTES, MAX_PLY, SearchResult, Searcher,
-    TranspositionTable, position_key,
+    DEFAULT_HASH_MEGABYTES, Limits, MATE, MAX_HASH_MEGABYTES, MAX_PLY, MAX_THREADS, SearchResult,
+    TranspositionTable, position_key, search_in_parallel,
 };
 use shakmaty::fen::Fen;
 use shakmaty::uci::UciMove;
@@ -47,6 +47,9 @@ struct Engine<W> {
     /// The `Hash` option, in MB: the size of `table`, and of the tables
     /// `bench` searches with.
     hash_megabytes: usize,
+    /// The `Threads` option: how many threads search each `go`
+    /// (`search::search_in_parallel`).
+    threads: usize,
 }
 
 impl<W: Write + Send + 'static> Engine<W> {
@@ -60,6 +63,7 @@ impl<W: Write + Send + 'static> Engine<W> {
             evaluation: Evaluation::Material,
             table: Arc::new(TranspositionTable::new(DEFAULT_HASH_MEGABYTES)),
             hash_megabytes: DEFAULT_HASH_MEGABYTES,
+            threads: 1,
         }
     }
 
@@ -82,6 +86,10 @@ impl<W: Write + Send + 'static> Engine<W> {
                     &format!(
                         "option name Hash type spin default {DEFAULT_HASH_MEGABYTES} min 1 max {MAX_HASH_MEGABYTES}"
                     ),
+                );
+                send(
+                    &self.out,
+                    &format!("option name Threads type spin default 1 min 1 max {MAX_THREADS}"),
                 );
                 send(&self.out, "uciok");
             }
@@ -126,6 +134,8 @@ impl<W: Write + Send + 'static> Engine<W> {
             self.load_eval_file(value);
         } else if name.eq_ignore_ascii_case("Hash") {
             self.resize_table(value);
+        } else if name.eq_ignore_ascii_case("Threads") {
+            self.set_threads(value);
         }
     }
 
@@ -145,6 +155,20 @@ impl<W: Write + Send + 'static> Engine<W> {
         self.table = Arc::new(TranspositionTable::new(0));
         self.hash_megabytes = megabytes.clamp(1, MAX_HASH_MEGABYTES);
         self.table = Arc::new(TranspositionTable::new(self.hash_megabytes));
+    }
+
+    /// `Threads`, clamped to the advertised range; a value that is not a
+    /// number leaves it as it is.
+    fn set_threads(&mut self, value: &str) {
+        let Ok(threads) = value.trim().parse::<usize>() else {
+            send(
+                &self.out,
+                &format!("info string Threads: not a number: {value}"),
+            );
+            return;
+        };
+        self.stop_search();
+        self.threads = threads.clamp(1, MAX_THREADS);
     }
 
     fn load_eval_file(&mut self, path: &str) {
@@ -262,13 +286,14 @@ impl<W: Write + Send + 'static> Engine<W> {
             &format!("info string {}", self.evaluation.describe()),
         );
         self.stop = Arc::new(AtomicBool::new(false));
-        let (out, game, stop, random, evaluation, table) = (
+        let (out, game, stop, random, evaluation, table, threads) = (
             Arc::clone(&self.out),
             self.game.clone(),
             Arc::clone(&self.stop),
             self.random_mover,
             self.evaluation.clone(),
             Arc::clone(&self.table),
+            self.threads,
         );
         self.worker = Some(thread::spawn(move || {
             let best = if random {
@@ -276,10 +301,10 @@ impl<W: Write + Send + 'static> Engine<W> {
             } else {
                 match evaluation {
                     Evaluation::Material => {
-                        search(MaterialEval, &game, &limits, &stop, &out, &table)
+                        search(MaterialEval, &game, &limits, &stop, &out, &table, threads)
                     }
                     Evaluation::Nnue { evaluator, .. } => {
-                        search(evaluator, &game, &limits, &stop, &out, &table)
+                        search(evaluator, &game, &limits, &stop, &out, &table, threads)
                     }
                     Evaluation::Broken { .. } => None,
                 }
@@ -304,24 +329,30 @@ impl<W: Write + Send + 'static> Engine<W> {
     }
 }
 
-/// Search the game's position with `evaluator` and the session's `table`,
-/// reporting each finished depth. Generic, so each evaluator gets its own
-/// compiled copy of the search.
-fn search<E: Evaluator, W: Write>(
+/// Search the game's position with `evaluator`, the session's `table` and
+/// `threads` threads, reporting each depth the main thread finishes.
+/// Generic, so each evaluator gets its own compiled copy of the search.
+fn search<E: Evaluator + Clone + Send, W: Write>(
     evaluator: E,
     game: &Game,
     limits: &Limits,
     stop: &AtomicBool,
     out: &Out<W>,
     table: &Arc<TranspositionTable>,
+    threads: usize,
 ) -> Option<Move> {
     let start = Instant::now();
-    let mut searcher = Searcher::with_table(evaluator, Arc::clone(table));
-    searcher
-        .search_with(&game.position, &game.earlier_keys, limits, stop, |result| {
-            send(out, &info_line(result, start.elapsed(), table.hashfull()));
-        })
-        .best_move
+    search_in_parallel(
+        evaluator,
+        table,
+        threads,
+        &game.position,
+        &game.earlier_keys,
+        limits,
+        stop,
+        |result| send(out, &info_line(result, start.elapsed(), table.hashfull())),
+    )
+    .best_move
 }
 
 /// `setoption name <name> [value <value>]`, as `(name, value)`. The name may
